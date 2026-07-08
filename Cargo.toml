@@ -1,0 +1,12 @@
+[package]
+name = "babysit"
+version = "0.1.0"
+edition = "2024"
+description = "Watch pull requests and merge requests for CI status and bot review findings."
+license = "MIT"
+repository = "https://github.com/volker48/babysit"
+readme = "README.md"
+
+[dependencies]
+regex = "1.11.1"
+serde_json = "1.0.133"
