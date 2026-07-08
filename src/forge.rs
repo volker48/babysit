@@ -100,6 +100,7 @@ pub fn auto_detect_forge() -> ForgeName {
 }
 
 const CLI_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_JSON_PAGES: usize = 100;
 
 pub fn run_json(command: &str, args: &[String], context: &str) -> Result<Value, CliError> {
     let output = command_output(command, args, context)?;
@@ -226,7 +227,7 @@ where
         ));
     }
     let mut results = Vec::new();
-    for page in 1.. {
+    for page in 1..=MAX_JSON_PAGES {
         let value = fetch_page(page, per_page)?;
         let items = json_array_page(value, context, page)?;
         let done = items.len() < per_page;
@@ -235,7 +236,10 @@ where
             return Ok(results);
         }
     }
-    unreachable!()
+    Err(parse_json_failure(
+        context,
+        format!("pagination exceeded {MAX_JSON_PAGES} pages"),
+    ))
 }
 
 pub fn collect_json_pages<F>(
@@ -261,8 +265,8 @@ fn json_array_page(value: Value, context: &str, page: usize) -> Result<Vec<Value
     match value {
         Value::Array(items) => Ok(items),
         _ => Err(parse_json_failure(
-            &format!("{context} page {page} returned a non-array JSON document"),
-            "null",
+            &format!("{context} page {page}"),
+            "returned a non-array JSON document",
         )),
     }
 }

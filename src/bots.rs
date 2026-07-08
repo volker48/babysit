@@ -329,13 +329,9 @@ fn first_prose_line(body: &str) -> String {
 }
 
 pub fn parse_nitpicks(review_body: &str, bot: &str) -> Vec<Finding> {
-    let Some(section_match) = Regex::new(r"(?s)<summary>🧹 Nitpick comments.*")
-        .unwrap()
-        .find(review_body)
-    else {
+    let Some(section) = nitpick_section(review_body) else {
         return Vec::new();
     };
-    let section = section_match.as_str();
     let file_re = Regex::new(r"<summary>([^<(]+?) \(\d+\)</summary>").unwrap();
     let file_matches: Vec<_> = file_re.captures_iter(section).collect();
     let mut findings = Vec::new();
@@ -349,6 +345,15 @@ pub fn parse_nitpicks(review_body: &str, bot: &str) -> Vec<Finding> {
         findings.extend(parse_nitpick_entries(&section[full.end()..end], path, bot));
     }
     findings
+}
+
+fn nitpick_section(review_body: &str) -> Option<&str> {
+    let summary = Regex::new(r"<summary>🧹 Nitpick comments \(\d+\)</summary>")
+        .unwrap()
+        .find(review_body)?;
+    let details_start = review_body[..summary.start()].rfind("<details")?;
+    let details_end = details_block_end(review_body, details_start)?;
+    Some(&review_body[summary.end()..details_end])
 }
 
 fn parse_nitpick_entries(block: &str, path: &str, bot: &str) -> Vec<Finding> {

@@ -48,7 +48,8 @@ impl ForgeProvider for GitLabProvider {
             .map(str::to_string);
         snapshot.checks = checks;
         snapshot.bot_reviews = parse_gitlab_bot_reviews(&discussions, &opts.bots);
-        snapshot.findings = parse_gitlab_findings(&discussions, &opts.bots);
+        snapshot.findings =
+            parse_gitlab_findings_for_head(&discussions, &opts.bots, &snapshot.head_oid);
         Ok(snapshot)
     }
 }
@@ -116,7 +117,15 @@ pub fn parse_gitlab_jobs(raw: &Value) -> Vec<PrCheck> {
 }
 
 pub fn parse_gitlab_findings(raw: &[Value], bots: &[String]) -> Vec<crate::core::Finding> {
-    gitlab_threads(raw)
+    parse_gitlab_findings_for_head(raw, bots, "")
+}
+
+pub fn parse_gitlab_findings_for_head(
+    raw: &[Value],
+    bots: &[String],
+    head_oid: &str,
+) -> Vec<crate::core::Finding> {
+    gitlab_threads(raw, head_oid)
         .iter()
         .filter_map(|thread| finding_from_thread(thread, bots))
         .collect()
@@ -156,7 +165,7 @@ fn upsert_latest(latest: &mut Vec<(String, BotReview)>, login: String, review: B
     latest.push((login, review));
 }
 
-fn gitlab_threads(discussions: &[Value]) -> Vec<ReviewThread> {
+fn gitlab_threads(discussions: &[Value], head_oid: &str) -> Vec<ReviewThread> {
     discussions
         .iter()
         .filter_map(|discussion| {
@@ -192,10 +201,18 @@ fn gitlab_threads(discussions: &[Value]) -> Vec<ReviewThread> {
                     .get("resolved")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
-                outdated: false,
+                outdated: gitlab_position_outdated(position, head_oid),
             })
         })
         .collect()
+}
+
+fn gitlab_position_outdated(position: &Value, head_oid: &str) -> bool {
+    !head_oid.is_empty()
+        && position
+            .get("head_sha")
+            .and_then(Value::as_str)
+            .is_some_and(|note_head| note_head != head_oid)
 }
 
 fn top_level_bot_notes<'a>(discussions: &'a [Value], bots: &[String]) -> Vec<&'a Value> {

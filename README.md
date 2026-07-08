@@ -46,7 +46,7 @@ Default bots are `coderabbitai`, `chatgpt-codex-connector`, and `cursor`.
 Watch a GitHub PR until checks and CodeRabbit settle:
 
 ```bash
-babysit wait 63 --repo volker48/agent-customization --bots coderabbitai
+babysit wait 63 --repo example-org/example-repo --bots coderabbitai
 ```
 
 List unresolved findings from a GitLab merge request:
@@ -58,7 +58,7 @@ babysit findings 42 --repo group/project --forge gitlab
 Print status without requiring a bot review:
 
 ```bash
-babysit status 63 --repo volker48/agent-customization --no-reviews
+babysit status 63 --repo example-org/example-repo --no-reviews
 ```
 
 ## Exit codes

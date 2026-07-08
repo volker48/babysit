@@ -24,7 +24,7 @@ fn parses_pr_number_repo_bot_list_and_findings_flags() {
         "findings",
         "63",
         "-R",
-        "volker48/agent-customization",
+        "example-org/example-repo",
         "--bots",
         "coderabbitai,chatgpt-codex-connector",
         "--all",
@@ -34,7 +34,7 @@ fn parses_pr_number_repo_bot_list_and_findings_flags() {
     .unwrap();
     assert_eq!(parsed.command, CommandName::Findings);
     assert_eq!(parsed.pr.as_deref(), Some("63"));
-    assert_eq!(parsed.repo.as_deref(), Some("volker48/agent-customization"));
+    assert_eq!(parsed.repo.as_deref(), Some("example-org/example-repo"));
     assert_eq!(
         parsed.bots,
         ["coderabbitai", "chatgpt-codex-connector"].map(str::to_string)
@@ -46,7 +46,7 @@ fn parses_pr_number_repo_bot_list_and_findings_flags() {
 fn supports_inline_value_flags() {
     let parsed = parse_args(&args(&[
         "wait",
-        "--repo=volker48/agent-customization",
+        "--repo=example-org/example-repo",
         "--bots=coderabbitai",
         "--forge=gitlab",
         "--timeout=60",

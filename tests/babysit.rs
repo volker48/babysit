@@ -9,7 +9,8 @@ use babysit::core::{
 use babysit::forge::{collect_json_pages, run_json_pages};
 use babysit::github::{REVIEW_QUERY, parse_pr_view, parse_review_data};
 use babysit::gitlab::{
-    parse_gitlab_bot_reviews, parse_gitlab_findings, parse_gitlab_jobs, parse_gitlab_mr,
+    parse_gitlab_bot_reviews, parse_gitlab_findings, parse_gitlab_findings_for_head,
+    parse_gitlab_jobs, parse_gitlab_mr,
 };
 
 fn fixture(name: &str) -> String {
@@ -136,8 +137,8 @@ fn review_query_paginates_review_threads() {
 fn parse_pr_view_parses_real_payload() {
     let snapshot = parse_pr_view(&fixture_json("pr-view.json")).unwrap();
     assert_eq!(snapshot.number, 63);
-    assert_eq!(snapshot.owner, "volker48");
-    assert_eq!(snapshot.repo, "agent-customization");
+    assert_eq!(snapshot.owner, "example-org");
+    assert_eq!(snapshot.repo, "example-repo");
     assert_eq!(snapshot.head_ref_name, "github-repo-orientation");
     assert_eq!(snapshot.head_oid.len(), 40);
     assert!(snapshot.head_committed_at.unwrap().ends_with('Z'));
@@ -262,6 +263,25 @@ fn parse_nitpicks_parses_real_review_body() {
     assert_eq!(nitpicks[0].severity.as_deref(), Some("trivial"));
     assert_eq!(nitpicks[1].path, "plugins/pi/scripts/lib/cancel.mjs");
     assert!(!nitpicks[1].detail.contains("<details>"));
+}
+
+#[test]
+fn parse_nitpicks_stops_at_nitpick_details_block() {
+    let leaked_section = [
+        "<details><summary>src/leak.rs (1)</summary><blockquote>",
+        "",
+        "`9`: no",
+        "</blockquote></details>",
+    ]
+    .join("\n");
+    let body = format!("{}\n{leaked_section}", fixture("coderabbit-review-body.md"));
+    let nitpicks = parse_nitpicks(&body, "coderabbit");
+    let paths: Vec<_> = nitpicks
+        .iter()
+        .map(|finding| finding.path.as_str())
+        .collect();
+    assert_eq!(nitpicks.len(), 2);
+    assert!(!paths.contains(&"src/leak.rs"));
 }
 
 #[test]
@@ -397,6 +417,26 @@ fn pagination_rejects_zero_page_size() {
 }
 
 #[test]
+fn pagination_rejects_full_pages_past_the_cap() {
+    let error = run_json_pages(
+        |_, size| Ok(Value::Array(vec![json!({}); size])),
+        "pages",
+        2,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("pagination exceeded 100 pages"));
+}
+
+#[test]
+fn pagination_reports_non_array_pages_cleanly() {
+    let error = run_json_pages(|_, _| Ok(json!({"bad": true})), "pages", 2).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("pages page 1 failed"));
+    assert!(message.contains("returned a non-array JSON document"));
+    assert!(!message.contains("null"));
+}
+
+#[test]
 fn gitlab_combines_multi_page_discussions() {
     let pages = [
         vec![
@@ -426,6 +466,19 @@ fn gitlab_skips_discussions_without_concrete_position() {
         .unwrap()
         .remove("position");
     assert!(parse_gitlab_findings(&[discussion], &["cursor".to_string()]).is_empty());
+}
+
+#[test]
+fn gitlab_marks_findings_from_different_head_outdated() {
+    let mut current = gitlab_discussion("src/current.ts", 10, "Current");
+    current["notes"][0]["position"]["head_sha"] = json!("current-head");
+    let mut stale = gitlab_discussion("src/stale.ts", 20, "Stale");
+    stale["notes"][0]["position"]["head_sha"] = json!("previous-head");
+    let findings =
+        parse_gitlab_findings_for_head(&[current, stale], &["cursor".to_string()], "current-head");
+    assert_eq!(findings.len(), 2);
+    assert!(!findings[0].outdated);
+    assert!(findings[1].outdated);
 }
 
 #[test]
