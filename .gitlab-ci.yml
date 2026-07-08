@@ -1,0 +1,57 @@
+image: rust:1.85.1-bookworm@sha256:bf7d87666c4da6eace19e06d21bc4859c6e2a5c97a21ac273b0e082112753cf0
+
+stages:
+  - verify
+  - build
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+variables:
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  CARGO_TARGET_DIR: "$CI_PROJECT_DIR/target"
+
+cache:
+  key:
+    files:
+      - Cargo.lock
+  paths:
+    - .cargo/registry/
+    - .cargo/git/
+    - target/
+
+.default_rust_job:
+  interruptible: true
+  before_script:
+    - rustup component add rustfmt clippy
+
+fmt:
+  extends: .default_rust_job
+  stage: verify
+  script:
+    - cargo fmt --all --check
+
+clippy:
+  extends: .default_rust_job
+  stage: verify
+  script:
+    - cargo clippy --locked --all-targets --all-features -- -D warnings
+
+test:
+  extends: .default_rust_job
+  stage: verify
+  script:
+    - cargo test --locked --all
+
+release:
+  extends: .default_rust_job
+  stage: build
+  script:
+    - cargo build --locked --release
+  artifacts:
+    name: "babysit-$CI_COMMIT_SHORT_SHA"
+    expire_in: 7 days
+    paths:
+      - target/release/babysit
