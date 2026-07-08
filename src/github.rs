@@ -103,6 +103,15 @@ pub fn parse_pr_view(raw: &Value) -> Result<PrSnapshot, String> {
 }
 
 pub fn parse_review_data(raw: &Value, bots: &[String]) -> ReviewData {
+    parse_review_data_for_head(raw, bots, "", None)
+}
+
+pub fn parse_review_data_for_head(
+    raw: &Value,
+    bots: &[String],
+    head_oid: &str,
+    head_committed_at: Option<&str>,
+) -> ReviewData {
     let pr = &raw["data"]["repository"]["pullRequest"];
     let reviews = pr["reviews"]["nodes"]
         .as_array()
@@ -114,6 +123,7 @@ pub fn parse_review_data(raw: &Value, bots: &[String]) -> ReviewData {
         .collect();
     let nitpicks = reviews
         .iter()
+        .filter(|review| review_matches_current_head(review, head_oid, head_committed_at))
         .flat_map(|review| parse_review_nitpicks(review, bots))
         .collect();
     let findings = findings_from_threads(&github_threads(pr), bots);
@@ -143,6 +153,26 @@ fn parse_review_nitpicks(review: &Value, bots: &[String]) -> Vec<crate::core::Fi
         return Vec::new();
     };
     adapter.review_body_findings(review.get("body").and_then(Value::as_str).unwrap_or(""))
+}
+
+fn review_matches_current_head(
+    review: &Value,
+    head_oid: &str,
+    head_committed_at: Option<&str>,
+) -> bool {
+    if head_oid.is_empty() && head_committed_at.is_none() {
+        return true;
+    }
+    if review["commit"]["oid"].as_str() == Some(head_oid) {
+        return true;
+    }
+    match (
+        review.get("submittedAt").and_then(Value::as_str),
+        head_committed_at,
+    ) {
+        (Some(submitted_at), Some(committed_at)) => submitted_at >= committed_at,
+        _ => false,
+    }
 }
 
 fn parse_github_checks(checks: Option<&Vec<Value>>) -> Vec<PrCheck> {
@@ -287,7 +317,12 @@ fn fetch_review_data(snapshot: &PrSnapshot, bots: &[String]) -> Result<ReviewDat
         let next = run_json("gh", &review_args(snapshot, Some(cursor)), "gh api graphql")?;
         append_review_threads(&mut first, &next);
     }
-    Ok(parse_review_data(&first, bots))
+    Ok(parse_review_data_for_head(
+        &first,
+        bots,
+        &snapshot.head_oid,
+        snapshot.head_committed_at.as_deref(),
+    ))
 }
 
 fn append_review_threads(first: &mut Value, next: &Value) {

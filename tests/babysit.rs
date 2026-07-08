@@ -7,7 +7,7 @@ use babysit::core::{
     unresolved_findings,
 };
 use babysit::forge::{collect_json_pages, run_json_pages};
-use babysit::github::{REVIEW_QUERY, parse_pr_view, parse_review_data};
+use babysit::github::{REVIEW_QUERY, parse_pr_view, parse_review_data, parse_review_data_for_head};
 use babysit::gitlab::{
     parse_gitlab_bot_reviews, parse_gitlab_findings, parse_gitlab_findings_for_head,
     parse_gitlab_jobs, parse_gitlab_mr,
@@ -325,6 +325,29 @@ fn parse_review_data_keeps_bot_reviews_and_drops_humans() {
     assert_eq!(data.bot_reviews[0].actionable, Some(1));
     assert_eq!(data.bot_reviews[0].commit_oid.as_deref(), Some("abc123"));
     assert_eq!(data.nitpicks.len(), 2);
+}
+
+#[test]
+fn parse_review_data_drops_stale_nitpicks_for_old_reviews() {
+    let mut raw = review_graphql();
+    let reviews = raw["data"]["repository"]["pullRequest"]["reviews"]["nodes"]
+        .as_array_mut()
+        .unwrap();
+    reviews[0]["commit"]["oid"] = json!("old-head");
+    reviews.push(json!({
+        "author": {"login": "coderabbitai"},
+        "state": "COMMENTED",
+        "submittedAt": "2026-07-06T12:30:00Z",
+        "body": "**Actionable comments posted: 0**",
+        "commit": {"oid": "current-head"}
+    }));
+    let data = parse_review_data_for_head(
+        &raw,
+        &["coderabbitai".to_string()],
+        "current-head",
+        Some("2026-07-06T12:00:00Z"),
+    );
+    assert!(data.nitpicks.is_empty());
 }
 
 #[test]
