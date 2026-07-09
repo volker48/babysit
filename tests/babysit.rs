@@ -285,6 +285,62 @@ fn parse_nitpicks_stops_at_nitpick_details_block() {
 }
 
 #[test]
+fn parse_nitpicks_stops_at_nitpick_blockquote() {
+    let body = [
+        "<details>",
+        "<summary>🧹 Nitpick comments (1)</summary><blockquote>",
+        "",
+        "<details><summary>src/current.rs (1)</summary><blockquote>",
+        "",
+        "`7`: **Keep this finding.**",
+        "",
+        "</blockquote></details>",
+        "",
+        "</blockquote>",
+        "<details><summary>src/leak.rs (1)</summary><blockquote>",
+        "",
+        "`9`: **Do not parse this.**",
+        "",
+        "</blockquote></details>",
+        "</details>",
+    ]
+    .join("\n");
+    let nitpicks = parse_nitpicks(&body, "coderabbit");
+    assert_eq!(nitpicks.len(), 1);
+    assert_eq!(nitpicks[0].path, "src/current.rs");
+}
+
+#[test]
+fn parse_nitpicks_ignores_content_blockquote_tags() {
+    let body = [
+        "<details>",
+        "<summary>🧹 Nitpick comments (2)</summary><blockquote>",
+        "",
+        "<details><summary>src/first.rs (1)</summary><blockquote>",
+        "",
+        "`7`: **Keep this finding.**",
+        "",
+        "Mention </blockquote> in prose.",
+        "```html",
+        "</blockquote>",
+        "```",
+        "",
+        "</blockquote></details>",
+        "<details><summary>src/second.rs (1)</summary><blockquote>",
+        "",
+        "`9`: **Keep this one too.**",
+        "",
+        "</blockquote></details>",
+        "",
+        "</blockquote></details>",
+    ]
+    .join("\n");
+    let nitpicks = parse_nitpicks(&body, "coderabbit");
+    let paths: Vec<_> = nitpicks.into_iter().map(|finding| finding.path).collect();
+    assert_eq!(paths, ["src/first.rs", "src/second.rs"]);
+}
+
+#[test]
 fn parse_nitpicks_returns_empty_without_section() {
     assert!(parse_nitpicks("**Actionable comments posted: 0**", "coderabbit").is_empty());
 }

@@ -262,32 +262,108 @@ pub fn strip_noise(body: &str) -> String {
 }
 
 fn details_block_end(text: &str, start: usize) -> Option<usize> {
+    html_block_end(text, start, "details")
+}
+
+fn html_block_end(text: &str, start: usize, tag: &str) -> Option<usize> {
+    let open_marker = format!("<{tag}");
+    let close_marker = format!("</{tag}>");
+    let code_ranges = markdown_code_ranges(text);
     let mut position = start;
     let mut depth = 0usize;
     loop {
-        let next_open = text[position..]
-            .find("<details")
-            .map(|index| position + index);
-        let next_close = text[position..]
-            .find("</details>")
-            .map(|index| position + index);
+        let next_open = next_html_marker(text, &open_marker, position, &code_ranges);
+        let next_close = next_html_marker(text, &close_marker, position, &code_ranges);
         match (next_open, next_close) {
             (Some(open), Some(close)) if open < close => {
                 depth += 1;
-                position = open + "<details".len();
+                position = open + open_marker.len();
             }
             (_, Some(close)) => {
                 if depth == 0 {
                     return None;
                 }
                 depth -= 1;
-                position = close + "</details>".len();
+                position = close + close_marker.len();
                 if depth == 0 {
                     return Some(position);
                 }
             }
             _ => return None,
         }
+    }
+}
+
+fn next_html_marker(
+    text: &str,
+    marker: &str,
+    mut position: usize,
+    code_ranges: &[(usize, usize)],
+) -> Option<usize> {
+    loop {
+        let index = text[position..]
+            .find(marker)
+            .map(|found| position + found)?;
+        if code_ranges
+            .iter()
+            .any(|(start, end)| index >= *start && index < *end)
+        {
+            position = index + marker.len();
+        } else {
+            return Some(index);
+        }
+    }
+}
+
+fn markdown_code_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let bytes = text.as_bytes();
+    let mut position = 0;
+    while let Some(start_offset) = text[position..].find('`') {
+        let start = position + start_offset;
+        let tick_count = bytes[start..]
+            .iter()
+            .take_while(|byte| **byte == b'`')
+            .count();
+        let marker = "`".repeat(tick_count);
+        let content_start = start + tick_count;
+        let Some(end_offset) = text[content_start..].find(&marker) else {
+            ranges.push((start, text.len()));
+            break;
+        };
+        let end = content_start + end_offset + tick_count;
+        ranges.push((start, end));
+        position = end;
+    }
+    ranges
+}
+
+fn nitpick_blockquote_end(
+    text: &str,
+    mut position: usize,
+    limit: usize,
+    code_ranges: &[(usize, usize)],
+) -> Option<usize> {
+    let mut detail_depth = 0usize;
+    loop {
+        let mut next = limit;
+        let mut marker = "";
+        for candidate in ["<details", "</details>", "</blockquote>"] {
+            if let Some(index) = next_html_marker(text, candidate, position, code_ranges) {
+                if index < next {
+                    next = index;
+                    marker = candidate;
+                }
+            }
+        }
+        match marker {
+            "<details" => detail_depth += 1,
+            "</details>" => detail_depth = detail_depth.checked_sub(1)?,
+            "</blockquote>" if detail_depth == 0 => return Some(next),
+            "</blockquote>" => {}
+            _ => return None,
+        }
+        position = next + marker.len();
     }
 }
 
@@ -326,7 +402,16 @@ fn nitpick_section(review_body: &str) -> Option<&str> {
     let summary = regexes::NITPICK_SECTION_RE.find(review_body)?;
     let details_start = review_body[..summary.start()].rfind("<details")?;
     let details_end = details_block_end(review_body, details_start)?;
-    Some(&review_body[summary.end()..details_end])
+    let block_start = review_body[summary.end()..details_end]
+        .find("<blockquote")
+        .map(|index| summary.end() + index)?;
+    let content_start = review_body[block_start..details_end]
+        .find('>')
+        .map(|index| block_start + index + 1)?;
+    let code_ranges = markdown_code_ranges(review_body);
+    let content_end =
+        nitpick_blockquote_end(review_body, content_start, details_end, &code_ranges)?;
+    Some(&review_body[content_start..content_end])
 }
 
 fn parse_nitpick_entries(block: &str, path: &str, bot: &str) -> Vec<Finding> {
