@@ -20,6 +20,15 @@ cargo build --release
 ./target/release/babysit status 123 --repo owner/repo
 ```
 
+## Add the companion skill
+
+I would add this globally so its available in all your repos. Feel free to adapt the skill to
+how you want to work.
+
+```bash
+npx skills add volker48/babysit
+```
+
 ## Usage
 
 ```bash
@@ -65,13 +74,13 @@ babysit status 63 --repo example-org/example-repo --no-reviews
 
 For `status` and `wait`:
 
-| Code | Meaning |
-| ---- | ------- |
-| 0 | Settled cleanly |
-| 1 | Settled with unresolved findings |
-| 2 | Settled with failed checks |
-| 3 | Pending or timed out |
-| 4 | Usage or forge CLI error |
+| Code | Meaning                          |
+| ---- | -------------------------------- |
+| 0    | Settled cleanly                  |
+| 1    | Settled with unresolved findings |
+| 2    | Settled with failed checks       |
+| 3    | Pending or timed out             |
+| 4    | Usage or forge CLI error         |
 
 `findings` exits `0` when it can list findings successfully.
 
