@@ -1,3 +1,7 @@
+<p>
+<img src="https://raw.githubusercontent.com/volker48/babysit/main/banner.png" alt="babysit" width="1100">
+</p>
+
 # babysit
 
 `babysit` is a Rust CLI for watching pull requests and merge requests until CI
