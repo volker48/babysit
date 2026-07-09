@@ -1,9 +1,67 @@
 // Regex keeps the Rust bot markdown parsers aligned with the original TS regex behavior.
+use std::sync::LazyLock;
+
 use regex::Regex;
 
 use crate::core::Finding;
 
 pub const DEFAULT_BOTS: [&str; 3] = ["coderabbitai", "chatgpt-codex-connector", "cursor"];
+
+static CODE_RABBIT_ACTIONABLE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\*\*Actionable comments posted: (\d+)\*\*").expect("valid CodeRabbit count regex")
+});
+static BUGBOT_ACTIONABLE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)Cursor Bugbot has reviewed.*?found\s+(\d+)\s+potential issues")
+        .expect("valid Bugbot count regex")
+});
+static CODE_RABBIT_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^[ \t]*_[^_\n]+_(?: \| _[^_\n]+_)+").expect("valid CodeRabbit header regex")
+});
+static SEVERITY_WORD_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:^|[^a-z])(critical|major|minor|trivial)(?:[^a-z]|$)")
+        .expect("valid severity word regex")
+});
+static CODEX_SEVERITY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"!\[P(\d) Badge\]").expect("valid Codex severity regex"));
+static MARKDOWN_IMAGE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"!\[[^\]]*\]\([^)]*\)").expect("valid Markdown image regex"));
+static BUGBOT_TITLE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^###\s+(.+)$").expect("valid Bugbot title regex"));
+static BUGBOT_SEVERITY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?im)^\*\*(High|Medium|Low) Severity\*\*$").expect("valid Bugbot severity regex")
+});
+static BOLD_ONLY_LINE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\*\*(.+?)\*\*$").expect("valid bold-only line regex"));
+static FENCED_BLOCK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)```[^\n]*\n(.*?)```").expect("valid fenced block regex"));
+static BUGBOT_DESCRIPTION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?s)<!-- DESCRIPTION START -->(.*?)<!-- DESCRIPTION END -->")
+        .expect("valid Bugbot description regex")
+});
+static BUGBOT_CTA_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?s)<div>\s*<a href="https://cursor\.com/open\?.*?</div>"#)
+        .expect("valid Bugbot CTA regex")
+});
+static BUGBOT_REVIEWED_BY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?s)<sup>Reviewed by \[Cursor Bugbot\].*?</sup>")
+        .expect("valid Bugbot reviewed-by regex")
+});
+static HTML_COMMENT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)<!--.*?-->").expect("valid HTML comment regex"));
+static INLINE_HTML_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"</?(?:sub|blockquote|summary|br)\s*/?>").expect("valid inline HTML tag regex")
+});
+static EXCESSIVE_BLANK_LINES_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\n{3,}").expect("valid excessive blank lines regex"));
+static NITPICK_FILE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"<summary>([^<(]+?) \(\d+\)</summary>").expect("valid nitpick file regex")
+});
+static NITPICK_SECTION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"<summary>🧹 Nitpick comments \(\d+\)</summary>")
+        .expect("valid nitpick section regex")
+});
+static NITPICK_ENTRY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"`(\d+(?:-\d+)?)`:").expect("valid nitpick entry regex"));
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Distilled {
@@ -123,8 +181,7 @@ fn generic_distill(body: &str) -> Distilled {
 }
 
 fn parse_code_rabbit_actionable_count(body: &str) -> Option<u32> {
-    Regex::new(r"\*\*Actionable comments posted: (\d+)\*\*")
-        .ok()?
+    CODE_RABBIT_ACTIONABLE_RE
         .captures(body)?
         .get(1)?
         .as_str()
@@ -133,8 +190,7 @@ fn parse_code_rabbit_actionable_count(body: &str) -> Option<u32> {
 }
 
 fn parse_bugbot_actionable_count(body: &str) -> Option<u32> {
-    Regex::new(r"(?is)Cursor Bugbot has reviewed.*?found\s+(\d+)\s+potential issues")
-        .ok()?
+    BUGBOT_ACTIONABLE_RE
         .captures(body)?
         .get(1)?
         .as_str()
@@ -144,14 +200,9 @@ fn parse_bugbot_actionable_count(body: &str) -> Option<u32> {
 
 pub fn distill_code_rabbit(body: &str) -> Distilled {
     let mut severity = None;
-    if let Some(header) = Regex::new(r"(?m)^[ \t]*_[^_\n]+_(?: \| _[^_\n]+_)+")
-        .unwrap()
-        .find(body)
-    {
-        let word_re =
-            Regex::new(r"(?i)(?:^|[^a-z])(critical|major|minor|trivial)(?:[^a-z]|$)").unwrap();
+    if let Some(header) = CODE_RABBIT_HEADER_RE.find(body) {
         for segment in header.as_str().split('|') {
-            if let Some(caps) = word_re.captures(segment) {
+            if let Some(caps) = SEVERITY_WORD_RE.captures(segment) {
                 severity = caps.get(1).map(|m| m.as_str().to_lowercase());
             }
         }
@@ -167,19 +218,14 @@ pub fn distill_code_rabbit(body: &str) -> Distilled {
 }
 
 pub fn distill_codex(body: &str) -> Distilled {
-    let severity = Regex::new(r"!\[P(\d) Badge\]")
-        .unwrap()
+    let severity = CODEX_SEVERITY_RE
         .captures(body)
         .and_then(|caps| caps.get(1).map(|m| format!("P{}", m.as_str())));
     let title = bold_only_line(body)
         .unwrap_or_default()
         .replace("<sub>", "")
         .replace("</sub>", "");
-    let title = Regex::new(r"!\[[^\]]*\]\([^)]*\)")
-        .unwrap()
-        .replace_all(&title, "")
-        .trim()
-        .to_string();
+    let title = MARKDOWN_IMAGE_RE.replace_all(&title, "").trim().to_string();
     let detail = strip_noise(body)
         .lines()
         .filter(|line| !line.starts_with("**") && !line.starts_with("Useful? React with"))
@@ -199,13 +245,11 @@ pub fn distill_codex(body: &str) -> Distilled {
 }
 
 pub fn distill_bugbot(body: &str) -> Distilled {
-    let title = Regex::new(r"(?m)^###\s+(.+)$")
-        .unwrap()
+    let title = BUGBOT_TITLE_RE
         .captures(body)
         .and_then(|caps| caps.get(1).map(|m| m.as_str().trim().to_string()))
         .unwrap_or_else(|| first_prose_line(body));
-    let severity = Regex::new(r"(?im)^\*\*(High|Medium|Low) Severity\*\*$")
-        .unwrap()
+    let severity = BUGBOT_SEVERITY_RE
         .captures(body)
         .and_then(|caps| caps.get(1).map(|m| m.as_str().to_lowercase()));
     let detail = extract_bugbot_description(body)
@@ -219,8 +263,7 @@ pub fn distill_bugbot(body: &str) -> Distilled {
 }
 
 fn bold_only_line(body: &str) -> Option<String> {
-    Regex::new(r"(?m)^\*\*(.+?)\*\*$")
-        .unwrap()
+    BOLD_ONLY_LINE_RE
         .captures(body)?
         .get(1)
         .map(|m| m.as_str().to_string())
@@ -228,16 +271,14 @@ fn bold_only_line(body: &str) -> Option<String> {
 
 fn extract_agent_prompt(body: &str) -> Option<String> {
     let marker = body.find("Prompt for AI Agents</summary>")?;
-    Regex::new(r"(?s)```[^\n]*\n(.*?)```")
-        .unwrap()
+    FENCED_BLOCK_RE
         .captures(&body[marker..])?
         .get(1)
         .map(|m| m.as_str().trim().to_string())
 }
 
 fn extract_bugbot_description(body: &str) -> Option<String> {
-    Regex::new(r"(?s)<!-- DESCRIPTION START -->(.*?)<!-- DESCRIPTION END -->")
-        .unwrap()
+    BUGBOT_DESCRIPTION_RE
         .captures(body)?
         .get(1)
         .map(|m| m.as_str().trim().to_string())
@@ -250,12 +291,8 @@ fn strip_after_first_details(body: &str) -> String {
 
 fn strip_bugbot_fallback(body: &str) -> String {
     let text = strip_noise(body);
-    let text = Regex::new(r#"(?s)<div>\s*<a href="https://cursor\.com/open\?.*?</div>"#)
-        .unwrap()
-        .replace_all(&text, "")
-        .to_string();
-    Regex::new(r"(?s)<sup>Reviewed by \[Cursor Bugbot\].*?</sup>")
-        .unwrap()
+    let text = BUGBOT_CTA_RE.replace_all(&text, "").to_string();
+    BUGBOT_REVIEWED_BY_RE
         .replace_all(&text, "")
         .replace("\n\n\n", "\n\n")
         .trim()
@@ -270,16 +307,9 @@ pub fn strip_noise(body: &str) -> String {
         };
         text.replace_range(start..end, "");
     }
-    let text = Regex::new(r"(?s)<!--.*?-->")
-        .unwrap()
-        .replace_all(&text, "")
-        .to_string();
-    let text = Regex::new(r"</?(?:sub|blockquote|summary|br)\s*/?>")
-        .unwrap()
-        .replace_all(&text, "")
-        .to_string();
-    Regex::new(r"\n{3,}")
-        .unwrap()
+    let text = HTML_COMMENT_RE.replace_all(&text, "").to_string();
+    let text = INLINE_HTML_TAG_RE.replace_all(&text, "").to_string();
+    EXCESSIVE_BLANK_LINES_RE
         .replace_all(&text, "\n\n")
         .trim()
         .to_string()
@@ -332,8 +362,7 @@ pub fn parse_nitpicks(review_body: &str, bot: &str) -> Vec<Finding> {
     let Some(section) = nitpick_section(review_body) else {
         return Vec::new();
     };
-    let file_re = Regex::new(r"<summary>([^<(]+?) \(\d+\)</summary>").unwrap();
-    let file_matches: Vec<_> = file_re.captures_iter(section).collect();
+    let file_matches: Vec<_> = NITPICK_FILE_RE.captures_iter(section).collect();
     let mut findings = Vec::new();
     for (index, caps) in file_matches.iter().enumerate() {
         let full = caps.get(0).unwrap();
@@ -348,17 +377,14 @@ pub fn parse_nitpicks(review_body: &str, bot: &str) -> Vec<Finding> {
 }
 
 fn nitpick_section(review_body: &str) -> Option<&str> {
-    let summary = Regex::new(r"<summary>🧹 Nitpick comments \(\d+\)</summary>")
-        .unwrap()
-        .find(review_body)?;
+    let summary = NITPICK_SECTION_RE.find(review_body)?;
     let details_start = review_body[..summary.start()].rfind("<details")?;
     let details_end = details_block_end(review_body, details_start)?;
     Some(&review_body[summary.end()..details_end])
 }
 
 fn parse_nitpick_entries(block: &str, path: &str, bot: &str) -> Vec<Finding> {
-    let entry_re = Regex::new(r"`(\d+(?:-\d+)?)`:").unwrap();
-    let entries: Vec<_> = entry_re.captures_iter(block).collect();
+    let entries: Vec<_> = NITPICK_ENTRY_RE.captures_iter(block).collect();
     entries
         .iter()
         .enumerate()
