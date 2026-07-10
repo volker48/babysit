@@ -45,13 +45,6 @@ test:
   script:
     - cargo test --locked --all
 
-macos-target-check:
-  extends: .default_rust_job
-  stage: verify
-  script:
-    - rustup target add x86_64-apple-darwin
-    - cargo check --locked --all-targets --target x86_64-apple-darwin
-
 release:
   extends: .default_rust_job
   stage: build

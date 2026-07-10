@@ -42,15 +42,16 @@ The pipeline caches Cargo registry/git data and `target/`, keyed by `Cargo.lock`
 
 Tests never connect to a live gateway, GitHub, Keychain, or clock. They script only the
 network/credential boundaries and exercise `wait_until_settled`, so event frame data cannot become
-an authority for settlement. A macOS target check catches the cfg-gated Keychain adapter without
-accessing a real Keychain:
+an authority for settlement. The cfg-gated Keychain adapter can be checked manually on a macOS
+host without accessing a real Keychain:
 
 ```bash
 rustup target add x86_64-apple-darwin
 cargo check --locked --all-targets --target x86_64-apple-darwin
 ```
 
-Live webhook/gateway validation belongs to the gateway work, not this CLI client.
+This Apple target check is not part of the Linux CI pipeline; it requires a macOS host and its
+native toolchain. Live webhook/gateway validation belongs to the gateway work, not this CLI client.
 
 ## Fixture strategy
 
