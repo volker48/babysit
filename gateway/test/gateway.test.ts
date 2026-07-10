@@ -202,6 +202,47 @@ describe("GitHub status gateway", () => {
     socket.close();
   });
 
+  it("migrates a legacy KV cursor before allocating or replaying wakes", async () => {
+    const repository = "legacy-cursor/repo";
+    const stub = env.REPOSITORY_GATEWAY.get(env.REPOSITORY_GATEWAY.idFromName(repository));
+    await runInDurableObject(stub, async (_, state) => {
+      await state.storage.put("cursor", 41);
+    });
+    await evictDurableObject(stub);
+
+    expect((await exports.default.fetch(signedStatus(repository, "legacy-head"))).status).toBe(202);
+    const socket = await watcher(repository);
+    const ready = nextMessage(socket);
+    register(socket, repository, "legacy-head", 41);
+
+    expect(await ready).toMatchObject({ type: "ready", cursor: 42 });
+    expect(await nextMessage(socket)).toMatchObject({ type: "resync", cursor: 42 });
+
+    const wake = nextMessage(socket);
+    expect((await exports.default.fetch(signedStatus(repository, "legacy-head"))).status).toBe(202);
+    expect(await wake).toMatchObject({ type: "wake", cursor: 43 });
+    socket.close();
+  });
+
+  it("keeps a newer SQL cursor during legacy KV migration", async () => {
+    const repository = "legacy-cursor-newer-sql/repo";
+    const stub = env.REPOSITORY_GATEWAY.get(env.REPOSITORY_GATEWAY.idFromName(repository));
+    await runInDurableObject(stub, async (_, state) => {
+      await state.storage.put("cursor", 41);
+      state.storage.sql.exec("UPDATE broker_state SET current_cursor = 50 WHERE id = 1");
+    });
+    await evictDurableObject(stub);
+
+    expect((await exports.default.fetch(signedStatus(repository, "legacy-head"))).status).toBe(202);
+    const socket = await watcher(repository);
+    const ready = nextMessage(socket);
+    register(socket, repository, "legacy-head", 50);
+
+    expect(await ready).toMatchObject({ type: "ready", cursor: 51 });
+    expect(await nextMessage(socket)).toMatchObject({ type: "resync", cursor: 51 });
+    socket.close();
+  });
+
   it("resyncs an expired or unknown cursor after ready", async () => {
     const repository = "resync/repo";
     const stub = env.REPOSITORY_GATEWAY.get(env.REPOSITORY_GATEWAY.idFromName(repository));

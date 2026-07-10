@@ -31,7 +31,15 @@ export async function fetch(request: Request, env: Env): Promise<Response> {
 export default { fetch } satisfies ExportedHandler<Env>;
 
 export class RepositoryGateway extends DurableObject<Env> {
-  private readonly history = new WakeHistory(this.ctx.storage);
+  private readonly history: WakeHistory;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.history = new WakeHistory(ctx.storage);
+    ctx.blockConcurrencyWhile(async () => {
+      await this.history.migrateLegacyCursor();
+    });
+  }
 
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get("Upgrade") === "websocket") return this.acceptWatcher(request);

@@ -30,6 +30,19 @@ export class WakeHistory {
     this.storage.sql.exec("INSERT OR IGNORE INTO broker_state (id, current_cursor) VALUES (1, 0)");
   }
 
+  async migrateLegacyCursor(): Promise<void> {
+    const legacy = await this.storage.get<unknown>("cursor");
+    if (legacy === undefined) return;
+    if (typeof legacy === "number" && Number.isSafeInteger(legacy) && legacy >= 0) {
+      this.storage.transactionSync(() => {
+        if (legacy > this.currentCursor()) {
+          this.storage.sql.exec("UPDATE broker_state SET current_cursor = ? WHERE id = 1", legacy);
+        }
+      });
+    }
+    await this.storage.delete("cursor");
+  }
+
   append(headOid: string, now: number): number {
     return this.storage.transactionSync(() => {
       const cursor = this.currentCursor() + 1;
