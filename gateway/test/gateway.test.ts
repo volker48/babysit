@@ -120,6 +120,22 @@ describe("GitHub status gateway", () => {
     expect(malformed.status).toBe(401);
   });
 
+  it("rejects a signed check run without repository routing identity", async () => {
+    const response = await exports.default.fetch(
+      signedWebhook("check_run", { check_run: { head_sha: "check-run-head" } }),
+    );
+
+    expect(response.status).toBe(400);
+  });
+
+  it("rejects a signed status without its required head SHA", async () => {
+    const response = await exports.default.fetch(
+      signedWebhook("status", { repository: { id: 1012, full_name: "invalid-status/repo" } }),
+    );
+
+    expect(response.status).toBe(400);
+  });
+
   it("fails closed when watcher or webhook secret bindings are absent or empty", async () => {
     for (const token of [undefined, ""]) {
       const env = missingBindingEnv();

@@ -8,7 +8,7 @@ export function normalizeGitHubWebhook(
   deliveryId: string | null,
   receivedAt: number,
 ): WakeEvent | null {
-  if (!isSupportedEvent(event) || !deliveryId) {
+  if (!isSupportedGitHubEvent(event) || !deliveryId) {
     return null;
   }
   const payload = parseObject(body);
@@ -43,17 +43,13 @@ function statusWake(
   repository: WakeEvent["repository"],
   deliveryId: string,
   receivedAt: number,
-): WakeEvent {
-  return {
-    deliveryId,
-    kind: "status",
-    repository,
-    headRevision: stringAt(payload, "sha"),
-    receivedAt,
-  };
+): WakeEvent | null {
+  const headRevision = stringAt(payload, "sha");
+  if (!headRevision) return null;
+  return { deliveryId, kind: "status", repository, headRevision, receivedAt };
 }
 
-function isSupportedEvent(event: string | null): event is string {
+export function isSupportedGitHubEvent(event: string | null): event is string {
   return [
     "check_run",
     "check_suite",

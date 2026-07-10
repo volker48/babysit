@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { normalizeGitHubWebhook } from "./github";
+import { isSupportedGitHubEvent, normalizeGitHubWebhook } from "./github";
 import { matchesWake, selectWakeRoute, type WakeEvent, type WakeRegistration } from "./wake";
 
 interface Env {
@@ -112,13 +112,15 @@ async function receiveWebhook(request: Request, env: Env): Promise<Response> {
   if (!(await hasValidSignature(body, signature, env.WEBHOOK_SECRET))) {
     return new Response("invalid signature", { status: 401 });
   }
+  const event = request.headers.get("X-GitHub-Event");
+  if (!isSupportedGitHubEvent(event)) return new Response(null, { status: 202 });
   const wake = normalizeGitHubWebhook(
-    request.headers.get("X-GitHub-Event"),
+    event,
     decoder.decode(body),
     request.headers.get("X-GitHub-Delivery"),
     Date.now(),
   );
-  if (!wake) return new Response(null, { status: 202 });
+  if (!wake) return new Response("invalid webhook payload", { status: 400 });
   const id = env.REPOSITORY_GATEWAY.idFromName(wake.repository.fullName);
   return env.REPOSITORY_GATEWAY.get(id).fetch("https://repository-gateway/wake", {
     method: "POST",
