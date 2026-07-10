@@ -84,15 +84,17 @@ operator-provided gateway bearer token in the macOS Keychain, then provide the n
 URL:
 
 ```bash
-printf '%s\n' "$TOKEN" | babysit gateway-token enroll
+babysit gateway-token enroll
 babysit wait 63 --repo example-org/example-repo --events \
   --gateway-url wss://gateway.example/watch
 ```
 
-`gateway-token rotate` replaces the local Keychain item with stdin input or a no-echo terminal
-prompt. `status` reports only whether it is configured; `delete` removes it. Tokens use Keychain
-service `babysit` and account `gateway-bearer-token`, are never read from environment variables or
-files, and macOS Keychain support is required for event mode.
+Enrollment prompts for the token without echoing it. For protected automation, provide it through
+piped stdin from a credential manager; do not put it in an environment variable, command argument,
+or logs. `gateway-token rotate` also accepts protected stdin or a no-echo terminal prompt. `status`
+reports only whether it is configured; `delete` removes it. Tokens use Keychain service `babysit`
+and account `gateway-bearer-token`, are never read from environment variables or files, and macOS
+Keychain support is required for event mode.
 
 The gateway URL is required and must be a plain `wss://` URL. GitLab event mode is unavailable.
 An event is only a wake signal: babysit performs an authoritative GitHub fetch after gateway ready,

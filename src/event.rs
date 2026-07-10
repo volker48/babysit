@@ -15,6 +15,7 @@ use crate::forge::CliError;
 use crate::wait::{SnapshotAction, WakeSource};
 
 const PROTOCOL_VERSION: u8 = 1;
+const REGISTRATION_ATTEMPT_CAP: Duration = Duration::from_secs(30);
 
 /// Supplies time, bounded waiting, and jitter for event reconnection.
 pub trait EventRuntime {
@@ -168,7 +169,7 @@ impl EventWakeSource {
         let deadline = self
             .runtime
             .now()
-            .checked_add(remaining)
+            .checked_add(remaining.min(REGISTRATION_ATTEMPT_CAP))
             .ok_or_else(deadline_error)?;
         let token = self.store.load()?.ok_or_else(missing_token)?;
         let timeout = self.remaining(deadline)?;
@@ -464,19 +465,60 @@ impl GatewaySocket for TungsteniteSocket {
     }
 
     fn read_text(&mut self, timeout: Duration) -> Result<Option<String>, GatewayError> {
-        set_socket_timeout(self.0.get_mut(), timeout)?;
-        match self.0.read() {
-            Ok(Message::Text(value)) => Ok(Some(value.to_string())),
-            Ok(Message::Close(_)) => Err(GatewayError::Retryable),
-            Ok(_) => Err(GatewayError::Fatal("gateway protocol error")),
-            Err(tungstenite::Error::Io(error)) if is_read_timeout(&error) => Ok(None),
-            Err(error) => Err(classify_tungstenite_error(error)),
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or(GatewayError::Retryable)?;
+        read_text_until(
+            &mut self.0,
+            deadline,
+            Instant::now,
+            |socket, timeout| {
+                set_socket_timeout(socket.get_mut(), timeout)?;
+                match socket.read() {
+                    Ok(message) => Ok(Some(message)),
+                    Err(tungstenite::Error::Io(error)) if is_read_timeout(&error) => Ok(None),
+                    Err(error) => Err(classify_tungstenite_error(error)),
+                }
+            },
+            |socket, timeout| {
+                set_write_timeout(socket.get_mut(), timeout)?;
+                socket.flush().map_err(classify_tungstenite_error)
+            },
+        )
+    }
+}
+
+fn read_text_until<S, N, R, F>(
+    mut socket: S,
+    deadline: Instant,
+    mut now: N,
+    mut read: R,
+    mut flush: F,
+) -> Result<Option<String>, GatewayError>
+where
+    N: FnMut() -> Instant,
+    R: FnMut(&mut S, Duration) -> Result<Option<Message>, GatewayError>,
+    F: FnMut(&mut S, Duration) -> Result<(), GatewayError>,
+{
+    loop {
+        let timeout = remaining_timeout_at(deadline, now())?;
+        match read(&mut socket, timeout)? {
+            Some(Message::Text(value)) => return Ok(Some(value.to_string())),
+            Some(Message::Ping(_)) => flush(&mut socket, remaining_timeout_at(deadline, now())?)?,
+            Some(Message::Pong(_)) => {}
+            Some(Message::Close(_)) => return Err(GatewayError::Retryable),
+            Some(_) => return Err(GatewayError::Fatal("gateway protocol error")),
+            None => return Ok(None),
         }
     }
 }
 
 fn remaining_timeout(deadline: Instant) -> Result<Duration, GatewayError> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
+    remaining_timeout_at(deadline, Instant::now())
+}
+
+fn remaining_timeout_at(deadline: Instant, now: Instant) -> Result<Duration, GatewayError> {
+    let remaining = deadline.saturating_duration_since(now);
     if remaining.is_zero() {
         return Err(GatewayError::Retryable);
     }
@@ -589,5 +631,74 @@ fn classify_tungstenite_error(error: tungstenite::Error) -> GatewayError {
             GatewayError::Retryable
         }
         _ => GatewayError::Fatal("gateway protocol error"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+
+    use super::*;
+
+    #[test]
+    fn reads_text_after_control_frames_and_flushes_automatic_pong() {
+        let start = Instant::now();
+        let now = Cell::new(start);
+        let frames = RefCell::new(VecDeque::from([
+            Message::Ping(Vec::new().into()),
+            Message::Pong(Vec::new().into()),
+            Message::Text("message".into()),
+        ]));
+        let read_timeouts = RefCell::new(Vec::new());
+        let flush_timeouts = RefCell::new(Vec::new());
+
+        let result = read_text_until(
+            (),
+            start + Duration::from_secs(5),
+            || now.get(),
+            |_, timeout| {
+                read_timeouts.borrow_mut().push(timeout);
+                now.set(now.get() + Duration::from_secs(1));
+                Ok(Some(frames.borrow_mut().pop_front().unwrap()))
+            },
+            |_, timeout| {
+                flush_timeouts.borrow_mut().push(timeout);
+                Ok(())
+            },
+        );
+
+        assert_eq!(result, Ok(Some("message".to_string())));
+        assert_eq!(
+            *read_timeouts.borrow(),
+            [
+                Duration::from_secs(5),
+                Duration::from_secs(4),
+                Duration::from_secs(3)
+            ]
+        );
+        assert_eq!(*flush_timeouts.borrow(), [Duration::from_secs(4)]);
+    }
+
+    #[test]
+    fn keeps_close_retryable_and_binary_frames_fatal() {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let close = read_text_until(
+            (),
+            deadline,
+            Instant::now,
+            |_, _| Ok(Some(Message::Close(None))),
+            |_, _| unreachable!(),
+        );
+        let binary = read_text_until(
+            (),
+            deadline,
+            Instant::now,
+            |_, _| Ok(Some(Message::Binary(Vec::new().into()))),
+            |_, _| unreachable!(),
+        );
+
+        assert_eq!(close, Err(GatewayError::Retryable));
+        assert_eq!(binary, Err(GatewayError::Fatal("gateway protocol error")));
     }
 }

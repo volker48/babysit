@@ -280,6 +280,41 @@ fn registration_uses_one_deadline_and_prevents_a_post_deadline_refetch() {
 }
 
 #[test]
+fn registration_attempt_caps_each_gateway_operation_at_thirty_seconds() {
+    let runtime = Rc::new(FakeRuntime::new());
+    let timeouts = Rc::new(RefCell::new(Vec::new()));
+    let mut source = EventWakeSource::with_runtime(
+        GatewayConfig::parse("wss://gateway.example/watch").unwrap(),
+        Box::new(MemoryStore(
+            SecretToken::new("test-token".to_string()).unwrap(),
+        )),
+        Box::new(TimedFactory {
+            runtime: runtime.clone(),
+            timeouts: timeouts.clone(),
+        }),
+        Box::new(SharedRuntime(runtime)),
+    )
+    .unwrap();
+
+    let action = babysit::wait::WakeSource::observe_snapshot(
+        &mut source,
+        &snapshot("OPEN"),
+        Duration::from_secs(1800),
+    )
+    .unwrap();
+
+    assert_eq!(action, babysit::wait::SnapshotAction::RefetchNow);
+    assert_eq!(
+        *timeouts.borrow(),
+        [
+            Duration::from_secs(30),
+            Duration::from_secs(28),
+            Duration::from_secs(26)
+        ]
+    );
+}
+
+#[test]
 fn initial_ready_timeout_degrades_to_retryable_fallback() {
     let received = Rc::new(RefCell::new(VecDeque::new()));
     let mut source = EventWakeSource::with_dependencies(
