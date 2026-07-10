@@ -17,23 +17,25 @@ export function normalizeGitHubWebhook(
   if (event === "status") return statusWake(payload, repository, deliveryId, receivedAt);
   if (event === "pull_request") return pullRequestWake(payload, repository, deliveryId, receivedAt);
   if (event === "pull_request_review") {
-    return pullRequestEventWake(payload, repository, deliveryId, receivedAt, "review");
+    return pullRequestEventWake(payload, repository, deliveryId, receivedAt, "review", "review");
   }
   if (event === "pull_request_review_comment") {
-    return pullRequestEventWake(payload, repository, deliveryId, receivedAt, "comment");
+    return pullRequestEventWake(payload, repository, deliveryId, receivedAt, "comment", "comment");
   }
   if (event === "pull_request_review_thread") {
-    return pullRequestEventWake(payload, repository, deliveryId, receivedAt, "thread");
+    return pullRequestEventWake(payload, repository, deliveryId, receivedAt, "thread", "thread");
   }
-  if (event === "issue_comment")
+  if (event === "issue_comment") {
     return issueCommentWake(payload, repository, deliveryId, receivedAt);
+  }
   const check = objectAt(payload, event === "check_run" ? "check_run" : "check_suite");
+  if (!check) return null;
   return {
     deliveryId,
     kind: "check",
     repository,
-    changeNumber: check ? firstPullRequestNumber(check) : undefined,
-    headRevision: check ? stringAt(check, "head_sha") : undefined,
+    changeNumber: firstPullRequestNumber(check),
+    headRevision: stringAt(check, "head_sha"),
     receivedAt,
   };
 }
@@ -67,15 +69,15 @@ function pullRequestWake(
   repository: WakeEvent["repository"],
   deliveryId: string,
   receivedAt: number,
-): WakeEvent {
+): WakeEvent | null {
   const pullRequest = objectAt(payload, "pull_request");
+  if (!pullRequest) return null;
   return {
     deliveryId,
     kind: "change",
     repository,
-    changeNumber:
-      numberAt(payload, "number") ?? (pullRequest ? numberAt(pullRequest, "number") : undefined),
-    headRevision: pullRequest ? headRevision(pullRequest) : undefined,
+    changeNumber: numberAt(payload, "number") ?? numberAt(pullRequest, "number"),
+    headRevision: headRevision(pullRequest),
     receivedAt,
   };
 }
@@ -86,14 +88,16 @@ function pullRequestEventWake(
   deliveryId: string,
   receivedAt: number,
   kind: WakeEvent["kind"],
-): WakeEvent {
+  requiredObject: string,
+): WakeEvent | null {
   const pullRequest = objectAt(payload, "pull_request");
+  if (!pullRequest || !objectAt(payload, requiredObject)) return null;
   return {
     deliveryId,
     kind,
     repository,
-    changeNumber: pullRequest ? numberAt(pullRequest, "number") : undefined,
-    headRevision: pullRequest ? headRevision(pullRequest) : undefined,
+    changeNumber: numberAt(pullRequest, "number"),
+    headRevision: headRevision(pullRequest),
     receivedAt,
   };
 }
@@ -103,10 +107,10 @@ function issueCommentWake(
   repository: WakeEvent["repository"],
   deliveryId: string,
   receivedAt: number,
-): WakeEvent {
+): WakeEvent | null {
   const issue = objectAt(payload, "issue");
-  const changeNumber =
-    issue && objectAt(issue, "pull_request") ? numberAt(issue, "number") : undefined;
+  if (!issue || !objectAt(payload, "comment")) return null;
+  const changeNumber = objectAt(issue, "pull_request") ? numberAt(issue, "number") : undefined;
   return { deliveryId, kind: "comment", repository, changeNumber, receivedAt };
 }
 

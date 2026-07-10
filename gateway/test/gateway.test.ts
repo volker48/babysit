@@ -120,20 +120,53 @@ describe("GitHub status gateway", () => {
     expect(malformed.status).toBe(401);
   });
 
-  it("rejects a signed check run without repository routing identity", async () => {
+  it.each([
+    ["check_run", {}],
+    ["check_suite", {}],
+    ["status", {}],
+    ["pull_request", { number: 17 }],
+    ["pull_request_review", { pull_request: {} }],
+    ["pull_request_review_comment", { pull_request: {} }],
+    ["pull_request_review_thread", { pull_request: {} }],
+    ["issue_comment", { issue: {} }],
+  ])("rejects a signed %s payload missing required event objects", async (event, eventPayload) => {
     const response = await exports.default.fetch(
-      signedWebhook("check_run", { check_run: { head_sha: "check-run-head" } }),
+      signedWebhook(event, {
+        repository: { id: 1012, full_name: "invalid-envelope/repo" },
+        ...eventPayload,
+      }),
     );
 
     expect(response.status).toBe(400);
   });
 
-  it("rejects a signed status without its required head SHA", async () => {
-    const response = await exports.default.fetch(
-      signedWebhook("status", { repository: { id: 1012, full_name: "invalid-status/repo" } }),
-    );
+  it("wakes all repository watchers for a valid check run without routing fields", async () => {
+    const repository = "check-run-fallback/repo";
+    const first = await watcher(repository);
+    const second = await watcher(repository);
+    const firstReady = nextMessage(first);
+    const secondReady = nextMessage(second);
+    register(first, repository, "first-head", null, 51);
+    register(second, repository, "second-head", null, 52);
+    await firstReady;
+    await secondReady;
 
-    expect(response.status).toBe(400);
+    const firstWake = nextMessage(first);
+    const secondWake = nextMessage(second);
+    expect(
+      (
+        await exports.default.fetch(
+          signedWebhook("check_run", {
+            repository: { id: 1013, full_name: repository },
+            check_run: {},
+          }),
+        )
+      ).status,
+    ).toBe(202);
+    expect(await firstWake).toMatchObject({ type: "wake", version: 1, cursor: 1 });
+    expect(await secondWake).toMatchObject({ type: "wake", version: 1, cursor: 1 });
+    first.close();
+    second.close();
   });
 
   it("fails closed when watcher or webhook secret bindings are absent or empty", async () => {
