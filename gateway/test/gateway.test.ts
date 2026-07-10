@@ -1,4 +1,4 @@
-import { SELF } from "cloudflare:test";
+import { exports } from "cloudflare:workers";
 import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { fetch as workerFetch } from "../src/worker";
@@ -33,7 +33,7 @@ function signedStatus(repository: string, sha: string): Request {
 }
 
 async function watcher(repository: string, token = "watcher-test-token"): Promise<WebSocket> {
-  const response = await SELF.fetch(`https://gateway.test/watch/${repository}`, {
+  const response = await exports.default.fetch(`https://gateway.test/watch/${repository}`, {
     headers: { Upgrade: "websocket", Authorization: `Bearer ${token}` },
   });
   expect(response.status).toBe(101);
@@ -67,28 +67,14 @@ function register(
   );
 }
 
-function expectNoMessage(socket: WebSocket): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, 25);
-    socket.addEventListener(
-      "message",
-      () => {
-        clearTimeout(timer);
-        reject(new Error("unexpected watcher message"));
-      },
-      { once: true },
-    );
-  });
-}
-
 describe("GitHub status gateway", () => {
   it("rejects unsigned and invalidly signed payloads before JSON parsing", async () => {
-    const missing = await SELF.fetch("https://gateway.test/webhooks/github", {
+    const missing = await exports.default.fetch("https://gateway.test/webhooks/github", {
       method: "POST",
       headers: { "content-type": "application/json", "x-github-event": "status" },
       body: "not json",
     });
-    const invalid = await SELF.fetch("https://gateway.test/webhooks/github", {
+    const invalid = await exports.default.fetch("https://gateway.test/webhooks/github", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -97,7 +83,7 @@ describe("GitHub status gateway", () => {
       },
       body: "not json",
     });
-    const malformed = await SELF.fetch("https://gateway.test/webhooks/github", {
+    const malformed = await exports.default.fetch("https://gateway.test/webhooks/github", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -131,7 +117,7 @@ describe("GitHub status gateway", () => {
   });
 
   it("rejects an unauthenticated watcher", async () => {
-    const response = await SELF.fetch("https://gateway.test/watch/auth/repo", {
+    const response = await exports.default.fetch("https://gateway.test/watch/auth/repo", {
       headers: { Upgrade: "websocket", Authorization: "Bearer wrong-token" },
     });
 
@@ -140,7 +126,7 @@ describe("GitHub status gateway", () => {
 
   it("sends ready before replaying a retained matching status", async () => {
     const repository = "replay/repo";
-    expect((await SELF.fetch(signedStatus(repository, "replay-head"))).status).toBe(202);
+    expect((await exports.default.fetch(signedStatus(repository, "replay-head"))).status).toBe(202);
     const socket = await watcher(repository);
     const ready = nextMessage(socket);
     register(socket, repository, "replay-head", 0);
@@ -164,7 +150,9 @@ describe("GitHub status gateway", () => {
   it("resyncs when the requested cursor is outside retained history", async () => {
     const repository = "resync/repo";
     for (let index = 0; index <= 100; index += 1) {
-      expect((await SELF.fetch(signedStatus(repository, `head-${index}`))).status).toBe(202);
+      expect((await exports.default.fetch(signedStatus(repository, `head-${index}`))).status).toBe(
+        202,
+      );
     }
     const socket = await watcher(repository);
     const ready = nextMessage(socket);
@@ -187,10 +175,14 @@ describe("GitHub status gateway", () => {
     await nonmatchingReady;
 
     const wake = nextMessage(matching);
-    const noWake = expectNoMessage(nonmatching);
-    expect((await SELF.fetch(signedStatus(repository, "matching-head"))).status).toBe(202);
+    expect((await exports.default.fetch(signedStatus(repository, "matching-head"))).status).toBe(
+      202,
+    );
     expect(await wake).toMatchObject({ type: "wake", version: 1, cursor: 1 });
-    await noWake;
+
+    const nonmatchingFrame = nextMessage(nonmatching);
+    register(nonmatching, repository, "other-head", null);
+    expect(await nonmatchingFrame).toMatchObject({ type: "ready", version: 1, cursor: 1 });
     matching.close();
     nonmatching.close();
   });
