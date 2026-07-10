@@ -5,7 +5,16 @@ The Worker accepts signed GitHub `check_run`, `check_suite`, `status`, `pull_req
 `issue_comment` webhooks and wakes authenticated `babysit wait --events` clients. It does not
 determine PR state: a wake asks the CLI to refetch GitHub authoritatively. Each repository's
 Durable Object persists a monotonic wake cursor and compact wake history for six hours, so a
-reconnect receives `ready` before ordered retained replay or a `resync` signal.
+reconnect receives `ready` before ordered retained replay or a `resync` signal. Retained delivery
+IDs have a unique index, so a duplicate is acknowledged without another cursor or logical wake.
+
+Wake metadata contains only the delivery ID, cursor, event kind, repository identifiers, optional PR
+number, optional head SHA, and receipt time. A durable outbox copies that same compact routing data
+until every socket send completes. The broker uses a fixed, non-sliding two-second burst window per
+canonical route (PR, then head SHA, then repository): one event creates one leading logical wake;
+two or more related events create exactly a leading and a trailing logical wake. Physical sends can
+be duplicated after a crash or send failure, and Cloudflare can run an alarm late, but the durable
+outbox makes late/retried alarms drain the retained work in cursor order rather than lose it.
 
 Deploy configuration is intentionally secret-free. Before deploying, set the two bindings:
 

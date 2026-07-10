@@ -40,12 +40,16 @@ function signedWebhook(event: string, payload: unknown, deliveryId = "delivery-1
   });
 }
 
-function signedStatus(repository: string, sha: string): Request {
-  return signedWebhook("status", {
-    ...statusFixture,
-    repository: { id: 1000, full_name: repository },
-    sha,
-  });
+function signedStatus(repository: string, sha: string, deliveryId = crypto.randomUUID()): Request {
+  return signedWebhook(
+    "status",
+    {
+      ...statusFixture,
+      repository: { id: 1000, full_name: repository },
+      sha,
+    },
+    deliveryId,
+  );
 }
 
 async function watcher(repository: string, token = "watcher-test-token"): Promise<WebSocket> {
@@ -198,6 +202,33 @@ describe("GitHub status gateway", () => {
     expect(response.status).toBe(401);
   });
 
+  it("acknowledges duplicate signed deliveries without another cursor or wake", async () => {
+    const repository = "duplicate/repo";
+    const socket = await watcher(repository);
+    const ready = nextMessage(socket);
+    register(socket, repository, "duplicate-head", null);
+    expect(await ready).toMatchObject({ type: "ready", cursor: 0 });
+
+    const wake = nextMessage(socket);
+    expect(
+      (await exports.default.fetch(signedStatus(repository, "duplicate-head", "same-delivery")))
+        .status,
+    ).toBe(202);
+    expect(await wake).toMatchObject({ type: "wake", cursor: 1 });
+    expect(
+      (await exports.default.fetch(signedStatus(repository, "duplicate-head", "same-delivery")))
+        .status,
+    ).toBe(202);
+    await expectNoMessage(socket);
+
+    const resumed = await watcher(repository);
+    const resumedReady = nextMessage(resumed);
+    register(resumed, repository, "duplicate-head", 1);
+    expect(await resumedReady).toMatchObject({ type: "ready", cursor: 1 });
+    socket.close();
+    resumed.close();
+  });
+
   it("sends ready before replaying a retained matching status", async () => {
     const repository = "replay/repo";
     expect((await exports.default.fetch(signedStatus(repository, "replay-head"))).status).toBe(202);
@@ -234,7 +265,7 @@ describe("GitHub status gateway", () => {
 
     expect(await ready).toMatchObject({ type: "ready", cursor: 2 });
     expect(await nextMessage(socket)).toMatchObject({ type: "replay", cursor: 1 });
-    expect(await nextMessage(socket)).toMatchObject({ type: "replay", cursor: 2 });
+    expect(await nextMessage(socket)).toMatchObject({ cursor: 2 });
     socket.close();
   });
 

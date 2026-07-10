@@ -46,8 +46,12 @@ export class RepositoryGateway extends DurableObject<Env> {
     if (request.headers.get("Upgrade") === "websocket") return this.acceptWatcher(request);
     if (request.method !== "POST") return new Response("not found", { status: 404 });
     const wake = await request.json<WakeEvent>();
-    this.publish(wake);
+    await this.publish(wake, Date.now());
     return new Response(null, { status: 202 });
+  }
+
+  async alarm(): Promise<void> {
+    await this.history.deliver(Date.now(), (intent) => this.broadcast(intent.cursor, intent.wake));
   }
 
   webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): void {
@@ -86,8 +90,12 @@ export class RepositoryGateway extends DurableObject<Env> {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  private publish(wake: WakeEvent): void {
-    const cursor = this.history.append(wake);
+  private async publish(wake: WakeEvent, now: number): Promise<void> {
+    await this.history.accept(wake, now);
+    await this.history.deliver(now, (intent) => this.broadcast(intent.cursor, intent.wake));
+  }
+
+  private broadcast(cursor: number, wake: WakeEvent): void {
     const watchers = activeWatchers(this.ctx.getWebSockets());
     const route = selectWakeRoute(
       wake,
