@@ -46,7 +46,7 @@ test:
     - cargo test --locked --all
 
 .default_gateway_job:
-  image: node:24-bookworm-slim
+  image: node:24-bookworm-slim@sha256:cb4e8f7c443347358b7875e717c29e27bf9befc8f5a26cf18af3c3dec80e58c5
   interruptible: true
   before_script:
     - corepack enable
