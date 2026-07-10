@@ -34,7 +34,7 @@ export function normalizeGitHubWebhook(
     deliveryId,
     kind: "check",
     repository,
-    changeNumber: firstPullRequestNumber(check),
+    changeNumber: singlePullRequestNumber(check),
     headRevision: stringAt(check, "head_sha"),
     receivedAt,
   };
@@ -135,9 +135,11 @@ function headRevision(value: JsonObject): string | undefined {
   return head ? stringAt(head, "sha") : undefined;
 }
 
-function firstPullRequestNumber(value: JsonObject): number | undefined {
+function singlePullRequestNumber(value: JsonObject): number | undefined {
   const pullRequests = value.pull_requests;
-  if (!Array.isArray(pullRequests) || !isObject(pullRequests[0])) return undefined;
+  if (!Array.isArray(pullRequests) || pullRequests.length !== 1 || !isObject(pullRequests[0])) {
+    return undefined;
+  }
   return numberAt(pullRequests[0], "number");
 }
 

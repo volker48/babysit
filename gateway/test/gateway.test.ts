@@ -4,7 +4,9 @@ import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { fetch as workerFetch } from "../src/worker";
 import checkRunFixture from "./fixtures/github-check-run.json";
+import checkRunMultiplePrsFixture from "./fixtures/github-check-run-multiple-prs.json";
 import checkSuiteFixture from "./fixtures/github-check-suite.json";
+import checkSuiteMultiplePrsFixture from "./fixtures/github-check-suite-multiple-prs.json";
 import pullRequestFixture from "./fixtures/github-pull-request.json";
 import pullRequestReviewFixture from "./fixtures/github-pull-request-review.json";
 import pullRequestReviewCommentFixture from "./fixtures/github-pull-request-review-comment.json";
@@ -466,6 +468,60 @@ describe("GitHub status gateway", () => {
     ).toBe(202);
     expect(await wake).toMatchObject({ type: "wake", version: 1, cursor: 1 });
     socket.close();
+  });
+
+  it.each([
+    ["check_run", checkRunMultiplePrsFixture],
+    ["check_suite", checkSuiteMultiplePrsFixture],
+  ])(
+    "wakes every matching head watcher for a signed multi-PR %s fixture",
+    async (event, fixture) => {
+      const repository = fixture.repository.full_name;
+      const first = await watcher(repository);
+      const second = await watcher(repository);
+      const firstReady = nextMessage(first);
+      const secondReady = nextMessage(second);
+      register(first, repository, "multi-check-head", null, 7);
+      register(second, repository, "multi-check-head", null, 8);
+      await firstReady;
+      await secondReady;
+
+      const firstWake = nextMessage(first);
+      const secondWake = nextMessage(second);
+      expect((await exports.default.fetch(signedWebhook(event, fixture))).status).toBe(202);
+      expect(await firstWake).toMatchObject({ type: "wake", version: 1, cursor: 1 });
+      expect(await secondWake).toMatchObject({ type: "wake", version: 1, cursor: 1 });
+      first.close();
+      second.close();
+    },
+  );
+
+  it("keeps single-PR check run routing ahead of a matching head", async () => {
+    const repository = "single-check-run-precedence/repo";
+    const change = await watcher(repository);
+    const revision = await watcher(repository);
+    const changeReady = nextMessage(change);
+    const revisionReady = nextMessage(revision);
+    register(change, repository, "older-head", null, 7);
+    register(revision, repository, "check-run-head", null, 99);
+    await changeReady;
+    await revisionReady;
+
+    const changeWake = nextMessage(change);
+    expect(
+      (
+        await exports.default.fetch(
+          signedWebhook("check_run", {
+            ...checkRunFixture,
+            repository: { id: 1017, full_name: repository },
+          }),
+        )
+      ).status,
+    ).toBe(202);
+    expect(await changeWake).toMatchObject({ type: "wake", version: 1, cursor: 1 });
+    await expectNoMessage(revision);
+    change.close();
+    revision.close();
   });
 
   it("prefers the pull request number from a signed pull request fixture", async () => {
