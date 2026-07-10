@@ -81,13 +81,22 @@ function fetchHeadOid(gh: string, pr: string, repository: string): string {
 }
 
 function fetchRepositoryId(gh: string, repository: string): number {
-  const result = spawnSync(gh, ["repo", "view", repository, "--json", "databaseId"], {
-    encoding: "utf8",
-  });
+  const result = spawnSync(gh, ["api", `repos/${repository}`], { encoding: "utf8" });
   if (result.status !== 0) throw new Error("could not fetch the repository ID");
-  const databaseId = JSON.parse(result.stdout).databaseId;
-  if (typeof databaseId !== "number") throw new Error("could not fetch the repository ID");
-  return databaseId;
+  const repositoryId = repositoryIdFromJson(result.stdout);
+  if (!repositoryId) throw new Error("could not fetch the repository ID");
+  return repositoryId;
+}
+
+function repositoryIdFromJson(output: string): number | null {
+  try {
+    const value: unknown = JSON.parse(output);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+    const id = (value as { id?: unknown }).id;
+    return typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? id : null;
+  } catch {
+    return null;
+  }
 }
 
 function webhookUrlFor(gateway: string): string {
