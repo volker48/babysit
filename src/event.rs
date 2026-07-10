@@ -286,6 +286,7 @@ impl EventWakeSource {
                 Ok(self.pending_refetch)
             }
             Ok(None) => {
+                self.socket = None;
                 self.sleep_until(deadline);
                 Ok(true)
             }

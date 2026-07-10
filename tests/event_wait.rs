@@ -50,6 +50,46 @@ struct ScriptedFactory {
     sent: Rc<RefCell<Vec<String>>>,
 }
 
+struct PlannedSocket {
+    received: VecDeque<Option<String>>,
+    sent: Rc<RefCell<Vec<String>>>,
+}
+
+impl GatewaySocket for PlannedSocket {
+    fn send_text(&mut self, value: String, _timeout: Duration) -> Result<(), GatewayError> {
+        self.sent.borrow_mut().push(value);
+        Ok(())
+    }
+
+    fn read_text(&mut self, _timeout: Duration) -> Result<Option<String>, GatewayError> {
+        Ok(self.received.pop_front().flatten())
+    }
+}
+
+struct PlannedFactory {
+    plans: RefCell<VecDeque<Result<VecDeque<Option<String>>, GatewayError>>>,
+    sent: Rc<RefCell<Vec<String>>>,
+}
+
+impl GatewaySocketFactory for PlannedFactory {
+    fn connect(
+        &self,
+        _config: &GatewayConfig,
+        _token: &str,
+        _timeout: Duration,
+    ) -> Result<Box<dyn GatewaySocket>, GatewayError> {
+        let received = self
+            .plans
+            .borrow_mut()
+            .pop_front()
+            .ok_or(GatewayError::Retryable)??;
+        Ok(Box::new(PlannedSocket {
+            received,
+            sent: self.sent.clone(),
+        }))
+    }
+}
+
 struct FailingFactory;
 struct RetryableFactory;
 
@@ -383,6 +423,71 @@ fn a_wake_causes_only_one_immediate_authoritative_refetch() {
         fetch_times,
         [start, start, start, start + Duration::from_secs(30),]
     );
+}
+
+#[test]
+fn established_read_timeout_falls_back_then_reconnects_and_refetches_after_ready() {
+    let runtime = Rc::new(FakeRuntime::new());
+    let start = *runtime.now.borrow();
+    let sent = Rc::new(RefCell::new(Vec::new()));
+    let mut source = EventWakeSource::with_runtime(
+        GatewayConfig::parse("wss://gateway.example/watch").unwrap(),
+        Box::new(MemoryStore(
+            SecretToken::new("test-token".to_string()).unwrap(),
+        )),
+        Box::new(PlannedFactory {
+            plans: RefCell::new(VecDeque::from([
+                Ok(VecDeque::from([
+                    Some(r#"{"type":"ready","version":1,"cursor":1}"#.to_string()),
+                    None,
+                ])),
+                Err(GatewayError::Retryable),
+                Ok(VecDeque::from([Some(
+                    r#"{"type":"ready","version":1,"cursor":2}"#.to_string(),
+                )])),
+            ])),
+            sent: sent.clone(),
+        }),
+        Box::new(SharedRuntime(runtime.clone())),
+    )
+    .unwrap();
+    let mut fetch_times = Vec::new();
+    let mut snapshots = vec![
+        snapshot("OPEN"),
+        snapshot("OPEN"),
+        snapshot("OPEN"),
+        snapshot("CLOSED"),
+    ]
+    .into_iter();
+
+    let outcome = wait_until_settled(
+        &mut |_| {
+            fetch_times.push(*runtime.now.borrow());
+            Ok(snapshots.next().unwrap())
+        },
+        &mut source,
+        Duration::from_secs(90),
+        Duration::from_secs(30),
+        &SettleOptions::default(),
+    )
+    .unwrap();
+
+    assert!(matches!(outcome, WaitOutcome::Settled { .. }));
+    assert_eq!(
+        fetch_times,
+        [
+            start,
+            start,
+            start + Duration::from_secs(30),
+            start + Duration::from_secs(31)
+        ]
+    );
+    assert_eq!(
+        runtime.sleeps.borrow().as_slice(),
+        [Duration::from_secs(30), Duration::from_secs(1)]
+    );
+    assert_eq!(sent.borrow().len(), 2);
+    assert!(sent.borrow()[1].contains("\"after\":1"));
 }
 
 #[test]

@@ -9,12 +9,13 @@ reconnect receives `ready` before ordered retained replay or a `resync` signal. 
 IDs have a unique index, so a duplicate is acknowledged without another cursor or logical wake.
 
 Wake metadata contains only the delivery ID, cursor, event kind, repository identifiers, optional PR
-number, optional head SHA, and receipt time. A durable outbox copies that same compact routing data
-until every socket send completes. The broker uses a fixed, non-sliding two-second burst window per
-canonical route (PR, then head SHA, then repository): one event creates one leading logical wake;
-two or more related events create exactly a leading and a trailing logical wake. Physical sends can
-be duplicated after a crash or send failure, and Cloudflare can run an alarm late, but the durable
-outbox makes late/retried alarms drain the retained work in cursor order rather than lose it.
+number, optional head SHA, and receipt time. A durable outbox holds only undelivered operational
+work. An intent is deleted immediately after a successful broadcast; failed sends remain retryable
+and are capped and pruned with the six-hour retention window. The broker uses a fixed, non-sliding
+two-second burst window per canonical route (PR, then head SHA, then repository): one event creates
+one leading logical wake; two or more related events create exactly a leading and a trailing logical
+wake. Physical sends can be duplicated after a crash or send failure, and Cloudflare can run an
+alarm late, but late/retried alarms drain retained work in cursor order rather than lose it.
 
 ## Deploy and operate
 

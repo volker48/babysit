@@ -139,10 +139,12 @@ newer than `ready` are actionable. A `resync` also causes an immediate authorita
 a fetch observes a different head SHA, the CLI re-registers and repeats the ready-then-refetch
 ordering. This applies again after reconnects, preventing a connect-time race from hiding a change.
 
-Wake history, delivery-ID deduplication, and the durable wake outbox are retained for six hours.
-Delivery is at-least-once: duplicate physical wake frames can cause an extra snapshot fetch, while
-replay, resync, and fallback polls protect against a missed frame. Related bursts are debounced, but
-the leading and trailing logical wakes are retained.
+Wake history and delivery-ID deduplication are retained for six hours. The durable outbox holds only
+undelivered operational work: successful broadcast intents are deleted immediately, while failed
+sends remain retryable and are capped and pruned with that six-hour window. Delivery is at-least-once:
+duplicate physical wake frames can cause an extra snapshot fetch, while replay, resync, and fallback
+polls protect against a missed frame. Related bursts are debounced, but the leading and trailing
+logical wakes are retained.
 
 ### Stored data and privacy
 
@@ -159,11 +161,13 @@ or 403 authorization responses are fatal configuration/authorization errors. Cor
 the CLI does not silently turn those errors into polling.
 
 Transport failures, connection and read timeouts, disconnects, HTTP 429, and HTTP 5xx responses are
-retryable. The CLI continues fallback polling while it reconnects with randomized exponential delays:
-a maximum of 1 second, then 2, 4, 8, 16, and 30 seconds thereafter. A successful registration resets
-the delay. Every successful authoritative fetch resets the event-mode fallback timer, including the
-initial, post-ready, wake, replay, resync, and fallback fetches. `--timeout` overrides the entire
-process even while it is reconnecting.
+retryable. A read timeout releases the established socket before the fallback fetch, so the next
+snapshot reconnects, registers, receives `ready`, and performs its post-ready fetch. The CLI
+continues fallback polling while it reconnects with randomized exponential delays: a maximum of 1
+second, then 2, 4, 8, 16, and 30 seconds thereafter. A successful registration resets the delay.
+Every successful authoritative fetch resets the event-mode fallback timer, including the initial,
+post-ready, wake, replay, resync, and fallback fetches. `--timeout` overrides the entire process even
+while it is reconnecting.
 
 ## Routine checks and troubleshooting
 
