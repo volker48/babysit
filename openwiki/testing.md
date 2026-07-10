@@ -27,17 +27,18 @@ cargo test --locked --all
 cargo build --locked --release
 ```
 
-The same pipeline also verifies the Cloudflare gateway package:
+The same pipeline also verifies the Cloudflare gateway package. From the workspace root, install the
+committed lockfile with lifecycle scripts disabled before running its checks:
 
 ```bash
+pnpm install --frozen-lockfile --ignore-scripts
 pnpm --filter @babysit/gateway lint
 pnpm --filter @babysit/gateway format:check
 pnpm --filter @babysit/gateway typecheck
 pnpm --filter @babysit/gateway test
 ```
 
-Install the committed pnpm workspace lockfile before running the gateway commands. The gateway
-Vitest suites cover signed webhook ingress, authentication, hibernatable WebSocket registration,
+The gateway Vitest suites cover signed webhook ingress, authentication, hibernatable WebSocket registration,
 ready/cursor replay and resync, compact retention, deduplication, debounce, and durable outbox
 retries. The deployed smoke is separate from these deterministic checks; see
 [Gateway operations](operations/gateway.md) for its protected-credential prerequisites and the
