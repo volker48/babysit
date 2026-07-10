@@ -649,25 +649,28 @@ fn retryable_connection_failure_degrades_to_the_wait_loop() {
 }
 
 #[test]
-fn resync_requests_an_authoritative_fetch() {
+fn resync_at_the_ready_cursor_requests_an_immediate_authoritative_fetch() {
+    let runtime = Rc::new(FakeRuntime::new());
+    let start = *runtime.now.borrow();
     let received = Rc::new(RefCell::new(VecDeque::from([
         r#"{"type":"ready","version":1,"cursor":45}"#.to_string(),
-        r#"{"type":"resync","version":1,"cursor":46}"#.to_string(),
+        r#"{"type":"resync","version":1,"cursor":45}"#.to_string(),
     ])));
     let sent = Rc::new(RefCell::new(Vec::new()));
-    let mut source = EventWakeSource::with_dependencies(
+    let mut source = EventWakeSource::with_runtime(
         GatewayConfig::parse("wss://gateway.example/watch").unwrap(),
         Box::new(MemoryStore(
             SecretToken::new("test-token".to_string()).unwrap(),
         )),
         Box::new(ScriptedFactory { received, sent }),
+        Box::new(SharedRuntime(runtime.clone())),
     )
     .unwrap();
-    let mut fetches = 0;
+    let mut fetch_times = Vec::new();
     let mut snapshots = vec![snapshot("OPEN"), snapshot("OPEN"), snapshot("CLOSED")].into_iter();
     let outcome = wait_until_settled(
         &mut |_| {
-            fetches += 1;
+            fetch_times.push(*runtime.now.borrow());
             Ok(snapshots.next().unwrap())
         },
         &mut source,
@@ -678,7 +681,7 @@ fn resync_requests_an_authoritative_fetch() {
     .unwrap();
 
     assert!(matches!(outcome, WaitOutcome::Settled { .. }));
-    assert_eq!(fetches, 3);
+    assert_eq!(fetch_times, [start, start, start]);
 }
 
 #[test]

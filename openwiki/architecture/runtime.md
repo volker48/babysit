@@ -39,9 +39,10 @@
 The gateway protocol is versioned JSON (`version: 1`) over an authenticated WebSocket opening
 handshake. The client sends a `register` with forge, host, repository, PR number, head OID, and
 last-seen cursor. It requires `ready(cursor)`, immediately fetches a new authoritative snapshot,
-and ignores `wake`, `replay`, and `resync` notifications at or below that ready cursor. Later
-notifications only request a fetch; their data is never used to decide settlement. A changed
-head OID replaces the registration and repeats the ready/fetch ordering. Transient transport,
+and ignores `wake` and `replay` notifications at or below that ready cursor. A `resync` always
+requests a fresh snapshot, including when its cursor equals `ready`; later `wake` and `replay`
+notifications also request a fetch. Their data is never used to decide settlement. A changed head
+OID replaces the registration and repeats the ready/fetch ordering. Transient transport,
 429, and 5xx failures use bounded reconnect delay while polling continues; malformed protocol and
 401/403 failures stop with a configuration error.
 

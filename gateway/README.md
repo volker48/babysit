@@ -2,6 +2,8 @@
 
 The Worker accepts only GitHub `status` webhooks and wakes authenticated `babysit wait --events`
 clients. It does not determine PR state: a wake asks the CLI to refetch GitHub authoritatively.
+Each repository's Durable Object persists a monotonic wake cursor and compact wake history for six
+hours, so a reconnect receives `ready` before ordered retained replay or a `resync` signal.
 
 Deploy configuration is intentionally secret-free. Before deploying, set the two bindings:
 
