@@ -3,7 +3,9 @@
 The Worker accepts signed GitHub `check_run`, `check_suite`, `status`, `pull_request`,
 `pull_request_review`, `pull_request_review_comment`, `pull_request_review_thread`, and
 `issue_comment` webhooks and wakes authenticated `babysit wait --events` clients. It does not
-determine PR state: a wake asks the CLI to refetch GitHub authoritatively.
+determine PR state: a wake asks the CLI to refetch GitHub authoritatively. Each repository's
+Durable Object persists a monotonic wake cursor and compact wake history for six hours, so a
+reconnect receives `ready` before ordered retained replay or a `resync` signal.
 
 Deploy configuration is intentionally secret-free. Before deploying, set the two bindings:
 

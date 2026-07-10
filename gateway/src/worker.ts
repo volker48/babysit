@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { isSupportedGitHubEvent, normalizeGitHubWebhook } from "./github";
+import { WakeHistory } from "./replay";
 import { matchesWake, selectWakeRoute, type WakeEvent, type WakeRegistration } from "./wake";
 
 interface Env {
@@ -8,18 +9,17 @@ interface Env {
   WATCHER_TOKEN: string;
 }
 
-interface RecordedWake extends WakeEvent {
-  cursor: number;
-}
-
 interface Registration extends WakeRegistration {
   after: number | null;
   repository: string;
 }
 
+interface SocketAttachment extends WakeRegistration {
+  cursor: number;
+}
+
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
-const historyLimit = 100;
 
 export async function fetch(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
@@ -32,24 +32,42 @@ export async function fetch(request: Request, env: Env): Promise<Response> {
 export default { fetch } satisfies ExportedHandler<Env>;
 
 export class RepositoryGateway extends DurableObject<Env> {
+  private readonly history: WakeHistory;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.history = new WakeHistory(ctx.storage);
+    ctx.blockConcurrencyWhile(async () => {
+      await this.history.migrateLegacyCursor();
+    });
+  }
+
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get("Upgrade") === "websocket") return this.acceptWatcher(request);
     if (request.method !== "POST") return new Response("not found", { status: 404 });
-    const event = await request.json<WakeEvent>();
-    await this.publish(event);
+    const wake = await request.json<WakeEvent>();
+    this.publish(wake);
     return new Response(null, { status: 202 });
   }
 
-  async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
+  webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): void {
     if (typeof message !== "string") return socket.close(1003, "text frames required");
     const registration = parseRegistration(message);
     if (!registration || !this.ctx.getTags(socket).includes(registration.repository)) {
       return socket.close(1008, "invalid registration");
     }
-    socket.serializeAttachment(registration);
-    const current = (await this.ctx.storage.get<number>("cursor")) ?? 0;
-    socket.send(frame("ready", current));
-    await this.replay(socket, registration.after, current);
+    const resume = this.history.resume(registration.after, registration, Date.now());
+    socket.serializeAttachment({
+      cursor: resume.cursor,
+      changeNumber: registration.changeNumber,
+      headRevision: registration.headRevision,
+    } satisfies SocketAttachment);
+    socket.send(frame("ready", resume.cursor));
+    if (resume.resync) {
+      socket.send(frame("resync", resume.cursor));
+      return;
+    }
+    for (const cursor of resume.replay) socket.send(frame("replay", cursor));
   }
 
   webSocketClose(socket: WebSocket): void {
@@ -68,39 +86,15 @@ export class RepositoryGateway extends DurableObject<Env> {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  private async publish(wake: WakeEvent): Promise<void> {
-    const cursor = ((await this.ctx.storage.get<number>("cursor")) ?? 0) + 1;
-    const event = { ...wake, cursor } satisfies RecordedWake;
-    await this.ctx.storage.put({ cursor, [eventKey(cursor)]: event });
-    if (cursor > historyLimit) await this.ctx.storage.delete(eventKey(cursor - historyLimit));
+  private publish(wake: WakeEvent): void {
+    const cursor = this.history.append(wake);
     const watchers = activeWatchers(this.ctx.getWebSockets());
     const route = selectWakeRoute(
-      event,
+      wake,
       watchers.map(({ registration }) => registration),
     );
     for (const { socket, registration } of watchers) {
-      if (matchesWake(event, registration, route)) socket.send(frame("wake", cursor));
-    }
-  }
-
-  private async replay(socket: WebSocket, after: number | null, current: number): Promise<void> {
-    if (after === null || after === current) return;
-    if (after > current || after < Math.max(0, current - historyLimit)) {
-      socket.send(frame("resync", current));
-      return;
-    }
-    const registration = attachedRegistration(socket);
-    if (!registration) return;
-    const watchers = activeWatchers(this.ctx.getWebSockets());
-    const events = await this.ctx.storage.list<RecordedWake>({ prefix: "event:" });
-    for (const event of events.values()) {
-      const route = selectWakeRoute(
-        event,
-        watchers.map(({ registration: active }) => active),
-      );
-      if (event.cursor > after && matchesWake(event, registration, route)) {
-        socket.send(frame("replay", event.cursor));
-      }
+      if (matchesWake(wake, registration, route)) socket.send(frame("wake", cursor));
     }
   }
 }
@@ -159,17 +153,24 @@ function activeWatchers(
   sockets: WebSocket[],
 ): { socket: WebSocket; registration: WakeRegistration }[] {
   return sockets.flatMap((socket) => {
-    const registration = attachedRegistration(socket);
+    const registration = attachmentRegistration(socket.deserializeAttachment());
     return registration ? [{ socket, registration }] : [];
   });
 }
 
-function attachedRegistration(socket: WebSocket): WakeRegistration | null {
-  const attachment = socket.deserializeAttachment() as Partial<Registration> | null;
-  if (typeof attachment?.changeNumber !== "number" || typeof attachment.headRevision !== "string") {
-    return null;
+function attachmentRegistration(attachment: unknown): WakeRegistration | null {
+  if (typeof attachment === "string") return { headRevision: attachment };
+  if (!attachment || typeof attachment !== "object") return null;
+  const value = attachment as Partial<SocketAttachment> & { headOid?: unknown };
+  if (typeof value.headRevision === "string") {
+    if (value.cursor !== undefined && !isValidCursor(value.cursor)) return null;
+    return {
+      changeNumber: typeof value.changeNumber === "number" ? value.changeNumber : undefined,
+      headRevision: value.headRevision,
+    };
   }
-  return { changeNumber: attachment.changeNumber, headRevision: attachment.headRevision };
+  if (!isValidCursor(value.cursor)) return null;
+  return typeof value.headOid === "string" ? { headRevision: value.headOid } : null;
 }
 
 function parseRegistration(message: string): Registration | null {
@@ -198,6 +199,10 @@ function parseRegistration(message: string): Registration | null {
 
 function isValidAfter(value: unknown): value is number | null {
   return value === null || (typeof value === "number" && Number.isSafeInteger(value) && value >= 0);
+}
+
+function isValidCursor(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isValidRegistration(
@@ -245,10 +250,6 @@ function parseSignature(signature: string | null): Uint8Array | null {
     bytes[index] = Number.parseInt(match[1].slice(index * 2, index * 2 + 2), 16);
   }
   return bytes;
-}
-
-function eventKey(cursor: number): string {
-  return `event:${cursor.toString().padStart(20, "0")}`;
 }
 
 function frame(type: "ready" | "wake" | "replay" | "resync", cursor: number): string {

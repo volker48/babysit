@@ -303,7 +303,8 @@ impl EventWakeSource {
             return Err(protocol_error());
         };
         self.last_seen = Some(self.last_seen.unwrap_or(ready_cursor).max(cursor));
-        if cursor > ready_cursor && matches!(kind.as_str(), "wake" | "replay" | "resync") {
+        if kind == "resync" || (cursor > ready_cursor && matches!(kind.as_str(), "wake" | "replay"))
+        {
             self.pending_refetch = true;
         }
         Ok(())

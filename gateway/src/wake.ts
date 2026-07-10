@@ -11,8 +11,8 @@ export interface WakeEvent {
 }
 
 export interface WakeRegistration {
-  changeNumber: number;
-  headRevision: string;
+  changeNumber?: number;
+  headRevision?: string;
 }
 
 export type WakeRoute = "change" | "revision" | "repository";
