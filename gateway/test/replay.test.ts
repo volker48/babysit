@@ -33,7 +33,47 @@ async function withHistory<T>(
   );
 }
 
+function tableColumns(state: DurableObjectState, table: string): string[] {
+  return state.storage.sql
+    .exec<{ name: string }>(`PRAGMA table_info(${table})`)
+    .toArray()
+    .map((column) => column.name);
+}
+
 describe("durable wake delivery", () => {
+  it("migrates #9 repository names out of retained replay metadata", async () => {
+    const repository = "schema-migration";
+    await withHistory(repository, (_, state) => {
+      state.storage.sql.exec("DROP TABLE wake_events");
+      state.storage.sql.exec(
+        "CREATE TABLE wake_events (cursor INTEGER PRIMARY KEY, received_at_ms INTEGER NOT NULL, " +
+          "kind TEXT NOT NULL, head_oid TEXT, pr_number INTEGER, delivery_id TEXT, " +
+          "repository_id TEXT, repository_full_name TEXT)",
+      );
+      state.storage.sql.exec(
+        "INSERT INTO wake_events VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        1,
+        base,
+        "status",
+        "head",
+        null,
+        "legacy-delivery",
+        "100",
+        "owner/repository",
+      );
+      state.storage.sql.exec("UPDATE broker_state SET current_cursor = 1 WHERE id = 1");
+    });
+    await evictDurableObject(stub(repository));
+    await withHistory(repository, (history, state) => {
+      expect(history.resume(0, { headRevision: "head" }, base)).toEqual({
+        cursor: 1,
+        replay: [1],
+        resync: false,
+      });
+      expect(tableColumns(state, "wake_events")).not.toContain("repository_full_name");
+    });
+  });
+
   it("retains a duplicate without allocating a cursor or outbox intent", async () => {
     await withHistory("duplicate", async (history, state) => {
       expect(await history.accept(wake(1, { changeNumber: 7 }), base)).toEqual({
@@ -49,6 +89,25 @@ describe("durable wake delivery", () => {
       ]);
       expect(state.storage.sql.exec("SELECT cursor FROM wake_outbox").toArray()).toEqual([
         { cursor: 1 },
+      ]);
+      expect(tableColumns(state, "wake_events")).toEqual([
+        "cursor",
+        "received_at_ms",
+        "kind",
+        "head_oid",
+        "pr_number",
+        "delivery_id",
+        "repository_id",
+      ]);
+      expect(tableColumns(state, "wake_outbox")).toEqual([
+        "cursor",
+        "retry_at_ms",
+        "received_at_ms",
+        "kind",
+        "delivery_id",
+        "repository_id",
+        "pr_number",
+        "head_oid",
       ]);
     });
   });

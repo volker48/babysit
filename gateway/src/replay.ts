@@ -11,7 +11,6 @@ interface StoredWake {
   kind: string;
   delivery_id: string | null;
   repository_id: string | null;
-  repository_full_name: string | null;
   pr_number: number | null;
   head_oid: string | null;
 }
@@ -48,7 +47,7 @@ export interface WakeIntent {
 export class WakeHistory {
   constructor(private readonly storage: DurableObjectStorage) {
     this.createTables();
-    this.migrateWakeColumns();
+    this.migrateWakeSchema();
     this.dedupeExistingHistory();
     this.storage.sql.exec(
       "CREATE UNIQUE INDEX IF NOT EXISTS wake_events_delivery_id ON wake_events (delivery_id) " +
@@ -132,8 +131,7 @@ export class WakeHistory {
     this.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS wake_events (" +
         "cursor INTEGER PRIMARY KEY, received_at_ms INTEGER NOT NULL, kind TEXT NOT NULL, " +
-        "head_oid TEXT, pr_number INTEGER, delivery_id TEXT, repository_id TEXT, " +
-        "repository_full_name TEXT)",
+        "head_oid TEXT, pr_number INTEGER, delivery_id TEXT, repository_id TEXT)",
     );
     this.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS debounce_bursts (route_key TEXT PRIMARY KEY, " +
@@ -142,17 +140,31 @@ export class WakeHistory {
     this.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS wake_outbox (cursor INTEGER PRIMARY KEY, retry_at_ms INTEGER NOT NULL, " +
         "received_at_ms INTEGER NOT NULL, kind TEXT NOT NULL, delivery_id TEXT NOT NULL, " +
-        "repository_id TEXT NOT NULL, repository_full_name TEXT NOT NULL, pr_number INTEGER, head_oid TEXT)",
+        "repository_id TEXT NOT NULL, pr_number INTEGER, head_oid TEXT)",
     );
     this.storage.sql.exec("INSERT OR IGNORE INTO broker_state (id, current_cursor) VALUES (1, 0)");
   }
 
-  private migrateWakeColumns(): void {
+  private migrateWakeSchema(): void {
     const columns = this.tableColumns("wake_events");
-    for (const column of ["repository_id", "repository_full_name"]) {
-      if (!columns.includes(column))
-        this.storage.sql.exec(`ALTER TABLE wake_events ADD COLUMN ${column} TEXT`);
+    if (columns.includes("repository_full_name")) {
+      this.storage.transactionSync(() => this.dropLegacyRepositoryName());
+      return;
     }
+    if (!columns.includes("repository_id")) {
+      this.storage.sql.exec("ALTER TABLE wake_events ADD COLUMN repository_id TEXT");
+    }
+  }
+
+  private dropLegacyRepositoryName(): void {
+    this.storage.sql.exec("ALTER TABLE wake_events RENAME TO wake_events_legacy");
+    this.createTables();
+    this.storage.sql.exec(
+      "INSERT INTO wake_events (cursor, received_at_ms, kind, head_oid, pr_number, delivery_id, repository_id) " +
+        "SELECT cursor, received_at_ms, kind, head_oid, pr_number, delivery_id, repository_id " +
+        "FROM wake_events_legacy",
+    );
+    this.storage.sql.exec("DROP TABLE wake_events_legacy");
   }
 
   private dedupeExistingHistory(): void {
@@ -167,7 +179,7 @@ export class WakeHistory {
     this.setCursor(cursor);
     this.storage.sql.exec(
       "INSERT INTO wake_events (cursor, received_at_ms, kind, head_oid, pr_number, delivery_id, " +
-        "repository_id, repository_full_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "repository_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
       cursor,
       wake.receivedAt,
       wake.kind,
@@ -175,7 +187,6 @@ export class WakeHistory {
       wake.changeNumber ?? null,
       wake.deliveryId,
       wake.repository.id,
-      wake.repository.fullName,
     );
     return cursor;
   }
@@ -205,14 +216,13 @@ export class WakeHistory {
   private insertIntent(cursor: number, wake: WakeEvent, retryAt: number): void {
     this.storage.sql.exec(
       "INSERT OR IGNORE INTO wake_outbox (cursor, retry_at_ms, received_at_ms, kind, delivery_id, " +
-        "repository_id, repository_full_name, pr_number, head_oid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "repository_id, pr_number, head_oid) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       cursor,
       retryAt,
       wake.receivedAt,
       wake.kind,
       wake.deliveryId,
       wake.repository.id,
-      wake.repository.fullName,
       wake.changeNumber ?? null,
       wake.headRevision ?? null,
     );
@@ -222,7 +232,7 @@ export class WakeHistory {
     return this.storage.sql
       .exec<OutboxRow>(
         "SELECT cursor, retry_at_ms, received_at_ms, kind, delivery_id, repository_id, " +
-          "repository_full_name, pr_number, head_oid FROM wake_outbox WHERE retry_at_ms <= ? " +
+          "pr_number, head_oid FROM wake_outbox WHERE retry_at_ms <= ? " +
           "ORDER BY cursor ASC",
         now,
       )
@@ -311,8 +321,8 @@ export class WakeHistory {
   private wakeAt(cursor: number): WakeEvent | null {
     const row = this.storage.sql
       .exec<StoredWake>(
-        "SELECT cursor, received_at_ms, kind, delivery_id, repository_id, repository_full_name, " +
-          "pr_number, head_oid FROM wake_events WHERE cursor = ?",
+        "SELECT cursor, received_at_ms, kind, delivery_id, repository_id, pr_number, head_oid " +
+          "FROM wake_events WHERE cursor = ?",
         cursor,
       )
       .toArray()[0];
@@ -334,8 +344,8 @@ export class WakeHistory {
   private rowsAfter(after: number): StoredWake[] {
     return this.storage.sql
       .exec<StoredWake>(
-        "SELECT cursor, received_at_ms, kind, delivery_id, repository_id, repository_full_name, " +
-          "pr_number, head_oid FROM wake_events WHERE cursor > ? ORDER BY cursor ASC",
+        "SELECT cursor, received_at_ms, kind, delivery_id, repository_id, pr_number, head_oid " +
+          "FROM wake_events WHERE cursor > ? ORDER BY cursor ASC",
         after,
       )
       .toArray();
@@ -394,7 +404,6 @@ function wakeFromRow(row: StoredWake): { cursor: number; wake: WakeEvent } | nul
     typeof row.kind !== "string" ||
     typeof row.delivery_id !== "string" ||
     typeof row.repository_id !== "string" ||
-    typeof row.repository_full_name !== "string" ||
     !optionalNumber(row.pr_number) ||
     !optionalString(row.head_oid)
   ) {
@@ -405,7 +414,7 @@ function wakeFromRow(row: StoredWake): { cursor: number; wake: WakeEvent } | nul
     wake: {
       deliveryId: row.delivery_id,
       kind: row.kind,
-      repository: { id: row.repository_id, fullName: row.repository_full_name },
+      repository: { id: row.repository_id, fullName: "" },
       changeNumber: row.pr_number ?? undefined,
       headRevision: row.head_oid || undefined,
       receivedAt: row.received_at_ms,
