@@ -1,0 +1,8 @@
+{
+  "repository": { "id": 1004, "full_name": "reviews/repo" },
+  "pull_request": {
+    "number": 23,
+    "head": { "sha": "review-head" }
+  },
+  "review": {}
+}

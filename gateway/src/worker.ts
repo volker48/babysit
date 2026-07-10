@@ -1,4 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
+import { normalizeGitHubWebhook } from "./github";
+import { matchesWake, selectWakeRoute, type WakeEvent, type WakeRegistration } from "./wake";
 
 interface Env {
   REPOSITORY_GATEWAY: DurableObjectNamespace<RepositoryGateway>;
@@ -6,14 +8,12 @@ interface Env {
   WATCHER_TOKEN: string;
 }
 
-interface StatusEvent {
+interface RecordedWake extends WakeEvent {
   cursor: number;
-  headOid: string;
 }
 
-interface Registration {
+interface Registration extends WakeRegistration {
   after: number | null;
-  headOid: string;
   repository: string;
 }
 
@@ -35,9 +35,8 @@ export class RepositoryGateway extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get("Upgrade") === "websocket") return this.acceptWatcher(request);
     if (request.method !== "POST") return new Response("not found", { status: 404 });
-    const status = await request.json<Pick<StatusEvent, "headOid">>();
-    if (typeof status.headOid !== "string") return new Response("bad status", { status: 400 });
-    await this.publish(status.headOid);
+    const event = await request.json<WakeEvent>();
+    await this.publish(event);
     return new Response(null, { status: 202 });
   }
 
@@ -47,10 +46,10 @@ export class RepositoryGateway extends DurableObject<Env> {
     if (!registration || !this.ctx.getTags(socket).includes(registration.repository)) {
       return socket.close(1008, "invalid registration");
     }
-    socket.serializeAttachment(registration.headOid);
+    socket.serializeAttachment(registration);
     const current = (await this.ctx.storage.get<number>("cursor")) ?? 0;
     socket.send(frame("ready", current));
-    await this.replay(socket, registration.after, registration.headOid, current);
+    await this.replay(socket, registration.after, current);
   }
 
   webSocketClose(socket: WebSocket): void {
@@ -69,30 +68,37 @@ export class RepositoryGateway extends DurableObject<Env> {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  private async publish(headOid: string): Promise<void> {
+  private async publish(wake: WakeEvent): Promise<void> {
     const cursor = ((await this.ctx.storage.get<number>("cursor")) ?? 0) + 1;
-    const event = { cursor, headOid } satisfies StatusEvent;
+    const event = { ...wake, cursor } satisfies RecordedWake;
     await this.ctx.storage.put({ cursor, [eventKey(cursor)]: event });
     if (cursor > historyLimit) await this.ctx.storage.delete(eventKey(cursor - historyLimit));
-    for (const socket of this.ctx.getWebSockets()) {
-      if (socket.deserializeAttachment() === headOid) socket.send(frame("wake", cursor));
+    const watchers = activeWatchers(this.ctx.getWebSockets());
+    const route = selectWakeRoute(
+      event,
+      watchers.map(({ registration }) => registration),
+    );
+    for (const { socket, registration } of watchers) {
+      if (matchesWake(event, registration, route)) socket.send(frame("wake", cursor));
     }
   }
 
-  private async replay(
-    socket: WebSocket,
-    after: number | null,
-    headOid: string,
-    current: number,
-  ): Promise<void> {
+  private async replay(socket: WebSocket, after: number | null, current: number): Promise<void> {
     if (after === null || after === current) return;
     if (after > current || after < Math.max(0, current - historyLimit)) {
       socket.send(frame("resync", current));
       return;
     }
-    const events = await this.ctx.storage.list<StatusEvent>({ prefix: "event:" });
+    const registration = attachedRegistration(socket);
+    if (!registration) return;
+    const watchers = activeWatchers(this.ctx.getWebSockets());
+    const events = await this.ctx.storage.list<RecordedWake>({ prefix: "event:" });
     for (const event of events.values()) {
-      if (event.cursor > after && event.headOid === headOid) {
+      const route = selectWakeRoute(
+        event,
+        watchers.map(({ registration: active }) => active),
+      );
+      if (event.cursor > after && matchesWake(event, registration, route)) {
         socket.send(frame("replay", event.cursor));
       }
     }
@@ -106,14 +112,17 @@ async function receiveWebhook(request: Request, env: Env): Promise<Response> {
   if (!(await hasValidSignature(body, signature, env.WEBHOOK_SECRET))) {
     return new Response("invalid signature", { status: 401 });
   }
-  if (request.headers.get("X-GitHub-Event") !== "status")
-    return new Response(null, { status: 202 });
-  const status = normalizeStatus(decoder.decode(body));
-  if (!status) return new Response("invalid status payload", { status: 400 });
-  const id = env.REPOSITORY_GATEWAY.idFromName(status.repository);
-  return env.REPOSITORY_GATEWAY.get(id).fetch("https://repository-gateway/status", {
+  const wake = normalizeGitHubWebhook(
+    request.headers.get("X-GitHub-Event"),
+    decoder.decode(body),
+    request.headers.get("X-GitHub-Delivery"),
+    Date.now(),
+  );
+  if (!wake) return new Response(null, { status: 202 });
+  const id = env.REPOSITORY_GATEWAY.idFromName(wake.repository.fullName);
+  return env.REPOSITORY_GATEWAY.get(id).fetch("https://repository-gateway/wake", {
     method: "POST",
-    body: JSON.stringify(status),
+    body: JSON.stringify(wake),
   });
 }
 
@@ -144,16 +153,21 @@ function isConfiguredSecret(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
-function normalizeStatus(body: string): { repository: string; headOid: string } | null {
-  try {
-    const value = JSON.parse(body) as { repository?: { full_name?: unknown }; sha?: unknown };
-    if (typeof value.repository?.full_name !== "string" || typeof value.sha !== "string") {
-      return null;
-    }
-    return { repository: value.repository.full_name, headOid: value.sha };
-  } catch {
+function activeWatchers(
+  sockets: WebSocket[],
+): { socket: WebSocket; registration: WakeRegistration }[] {
+  return sockets.flatMap((socket) => {
+    const registration = attachedRegistration(socket);
+    return registration ? [{ socket, registration }] : [];
+  });
+}
+
+function attachedRegistration(socket: WebSocket): WakeRegistration | null {
+  const attachment = socket.deserializeAttachment() as Partial<Registration> | null;
+  if (typeof attachment?.changeNumber !== "number" || typeof attachment.headRevision !== "string") {
     return null;
   }
+  return { changeNumber: attachment.changeNumber, headRevision: attachment.headRevision };
 }
 
 function parseRegistration(message: string): Registration | null {
@@ -169,7 +183,12 @@ function parseRegistration(message: string): Registration | null {
     if (!isValidAfter(after) || !isValidRegistration(value.type, value.version, watch)) {
       return null;
     }
-    return { after, headOid: watch.headOid, repository: watch.repository };
+    return {
+      after,
+      changeNumber: watch.number,
+      headRevision: watch.headOid,
+      repository: watch.repository,
+    };
   } catch {
     return null;
   }
@@ -183,7 +202,7 @@ function isValidRegistration(
   type: unknown,
   version: unknown,
   watch: Record<string, unknown> | undefined,
-): watch is Record<"headOid" | "repository", string> {
+): watch is Record<"headOid" | "repository", string> & Record<"number", number> {
   if (type !== "register" || version !== 1 || !watch) return false;
   return (
     watch.forge === "github" &&

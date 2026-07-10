@@ -1,7 +1,9 @@
 # babysit gateway
 
-The Worker accepts only GitHub `status` webhooks and wakes authenticated `babysit wait --events`
-clients. It does not determine PR state: a wake asks the CLI to refetch GitHub authoritatively.
+The Worker accepts signed GitHub `check_run`, `check_suite`, `status`, `pull_request`,
+`pull_request_review`, `pull_request_review_comment`, `pull_request_review_thread`, and
+`issue_comment` webhooks and wakes authenticated `babysit wait --events` clients. It does not
+determine PR state: a wake asks the CLI to refetch GitHub authoritatively.
 
 Deploy configuration is intentionally secret-free. Before deploying, set the two bindings:
 
@@ -11,9 +13,13 @@ pnpm exec wrangler secret put WEBHOOK_SECRET
 pnpm exec wrangler secret put WATCHER_TOKEN
 ```
 
-Point the GitHub webhook at `https://babysit.mindgoblin.pw/webhooks/github` and use a `status`
-event. Configure CLI clients with `--gateway-url wss://babysit.mindgoblin.pw/watch`; the CLI
-adds the authoritative snapshot repository as encoded path segments.
+Point the GitHub webhook at `https://babysit.mindgoblin.pw/webhooks/github` and subscribe to the
+supported events above. Configure CLI clients with the `--gateway-url` URL below; the CLI adds the
+authoritative snapshot repository as encoded path segments.
+
+```text
+wss://babysit.mindgoblin.pw/watch
+```
 
 ## Live smoke
 

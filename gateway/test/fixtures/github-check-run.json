@@ -1,0 +1,7 @@
+{
+  "repository": { "id": 1001, "full_name": "checks/repo" },
+  "check_run": {
+    "pull_requests": [{ "number": 7 }],
+    "head_sha": "check-run-head"
+  }
+}
