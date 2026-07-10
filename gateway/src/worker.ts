@@ -85,8 +85,8 @@ export class RepositoryGateway extends DurableObject<Env> {
     headOid: string,
     current: number,
   ): Promise<void> {
-    if (after === null || after >= current) return;
-    if (after < Math.max(0, current - historyLimit)) {
+    if (after === null || after === current) return;
+    if (after > current || after < Math.max(0, current - historyLimit)) {
       socket.send(frame("resync", current));
       return;
     }

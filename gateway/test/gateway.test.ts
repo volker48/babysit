@@ -123,6 +123,17 @@ describe("GitHub status gateway", () => {
     socket.close();
   });
 
+  it("resyncs when a registration cursor is ahead of the current cursor", async () => {
+    const repository = "ahead/repo";
+    const socket = await watcher(repository);
+    const ready = nextMessage(socket);
+    register(socket, repository, "ahead-head", 1);
+
+    expect(await ready).toMatchObject({ type: "ready", cursor: 0 });
+    expect(await nextMessage(socket)).toMatchObject({ type: "resync", cursor: 0 });
+    socket.close();
+  });
+
   it("resyncs when the requested cursor is outside retained history", async () => {
     const repository = "resync/repo";
     for (let index = 0; index <= 100; index += 1) {
