@@ -627,12 +627,30 @@ where
 
 // Rustls requires a process-wide provider before any TLS client builder is used.
 fn initialize_tls_provider() -> Result<(), GatewayError> {
-    if rustls::crypto::CryptoProvider::get_default().is_some() {
+    install_tls_provider_once(
+        || rustls::crypto::CryptoProvider::get_default().is_some(),
+        || rustls::crypto::ring::default_provider().install_default(),
+    )
+}
+
+fn install_tls_provider_once<Installed, Install, Error>(
+    mut is_installed: Installed,
+    install: Install,
+) -> Result<(), GatewayError>
+where
+    Installed: FnMut() -> bool,
+    Install: FnOnce() -> Result<(), Error>,
+{
+    if is_installed() {
         return Ok(());
     }
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .map_err(|_| GatewayError::Fatal("gateway TLS provider failed to initialize"))
+    match install() {
+        Ok(()) => Ok(()),
+        Err(_) if is_installed() => Ok(()),
+        Err(_) => Err(GatewayError::Fatal(
+            "gateway TLS provider failed to initialize",
+        )),
+    }
 }
 
 fn gateway_request(
@@ -740,6 +758,21 @@ mod tests {
     fn installs_process_level_tls_provider() {
         initialize_tls_provider().unwrap();
         assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+    }
+
+    #[test]
+    fn accepts_provider_installed_by_racing_caller() {
+        let installed = Cell::new(false);
+        assert!(
+            install_tls_provider_once(
+                || installed.get(),
+                || {
+                    installed.set(true);
+                    Err(())
+                },
+            )
+            .is_ok()
+        );
     }
 
     #[test]
