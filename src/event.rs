@@ -1,4 +1,5 @@
 use std::net::{SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -16,6 +17,7 @@ use crate::wait::{SnapshotAction, WakeSource};
 
 const PROTOCOL_VERSION: u8 = 1;
 const REGISTRATION_ATTEMPT_CAP: Duration = Duration::from_secs(30);
+static RESOLVER_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 /// Supplies time, bounded waiting, and jitter for event reconnection.
 pub trait EventRuntime {
@@ -528,14 +530,50 @@ fn remaining_timeout_at(deadline: Instant, now: Instant) -> Result<Duration, Gat
     Ok(remaining)
 }
 
+struct ResolverPermit {
+    in_flight: &'static AtomicBool,
+}
+
+impl ResolverPermit {
+    fn acquire(in_flight: &'static AtomicBool) -> Result<Self, GatewayError> {
+        in_flight
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .map_err(|_| GatewayError::Retryable)?;
+        Ok(Self { in_flight })
+    }
+}
+
+impl Drop for ResolverPermit {
+    fn drop(&mut self) {
+        self.in_flight.store(false, Ordering::Release);
+    }
+}
+
 fn resolve_addresses(url: Url, timeout: Duration) -> Result<Vec<SocketAddr>, GatewayError> {
+    resolve_addresses_with(&RESOLVER_IN_FLIGHT, timeout, move || {
+        url.socket_addrs(|| None)
+            .map_err(|_| GatewayError::Retryable)
+    })
+}
+
+fn resolve_addresses_with<F>(
+    in_flight: &'static AtomicBool,
+    timeout: Duration,
+    resolve: F,
+) -> Result<Vec<SocketAddr>, GatewayError>
+where
+    F: FnOnce() -> Result<Vec<SocketAddr>, GatewayError> + Send + 'static,
+{
+    let permit = ResolverPermit::acquire(in_flight)?;
     let (sender, receiver) = mpsc::sync_channel(1);
-    thread::spawn(move || {
-        let result = url
-            .socket_addrs(|| None)
-            .map_err(|_| GatewayError::Retryable);
-        let _ = sender.send(result);
-    });
+    thread::Builder::new()
+        .name("babysit-dns-resolver".to_string())
+        .spawn(move || {
+            let result = resolve();
+            drop(permit);
+            let _ = sender.send(result);
+        })
+        .map_err(|_| GatewayError::Retryable)?;
     receiver
         .recv_timeout(timeout)
         .map_err(|_| GatewayError::Retryable)?
@@ -666,8 +704,51 @@ fn classify_tungstenite_error(error: tungstenite::Error) -> GatewayError {
 mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
+    use std::sync::Arc;
 
     use super::*;
+
+    #[test]
+    fn limits_resolvers_left_running_after_timeout() {
+        static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+        let (release_sender, release_receiver) = mpsc::channel();
+        let first = resolve_addresses_with(&IN_FLIGHT, Duration::from_millis(20), move || {
+            release_receiver.recv().unwrap();
+            Ok(vec!["127.0.0.1:443".parse().unwrap()])
+        });
+        let second_called = Arc::new(AtomicBool::new(false));
+        let called = Arc::clone(&second_called);
+        let second = resolve_addresses_with(&IN_FLIGHT, Duration::from_secs(1), move || {
+            called.store(true, Ordering::Release);
+            Ok(vec!["127.0.0.2:443".parse().unwrap()])
+        });
+        release_sender.send(()).unwrap();
+        let release_deadline = Instant::now() + Duration::from_secs(1);
+        while IN_FLIGHT.load(Ordering::Acquire) {
+            assert!(Instant::now() < release_deadline, "resolver permit leaked");
+            thread::yield_now();
+        }
+        let third = resolve_addresses_with(&IN_FLIGHT, Duration::from_secs(1), || {
+            Ok(vec!["127.0.0.3:443".parse().unwrap()])
+        });
+
+        assert_eq!(first, Err(GatewayError::Retryable));
+        assert_eq!(second, Err(GatewayError::Retryable));
+        assert!(!second_called.load(Ordering::Acquire));
+        assert_eq!(third, Ok(vec!["127.0.0.3:443".parse().unwrap()]));
+    }
+
+    #[test]
+    fn resolver_failures_remain_retryable() {
+        static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+        let result = resolve_addresses_with(&IN_FLIGHT, Duration::from_secs(1), || {
+            Err(GatewayError::Retryable)
+        });
+
+        assert_eq!(result, Err(GatewayError::Retryable));
+    }
 
     #[test]
     fn reads_text_after_control_frames_and_flushes_automatic_pong() {
