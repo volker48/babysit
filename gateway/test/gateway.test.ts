@@ -2,6 +2,7 @@ import { env, exports } from "cloudflare:workers";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { DEBOUNCE_WINDOW_MS } from "../src/replay";
 import { fetch as workerFetch } from "../src/worker";
 import statusFixture from "./fixtures/github-status.json";
 
@@ -15,10 +16,10 @@ function missingBindingEnv(): Parameters<typeof workerFetch>[1] {
   } as unknown as Parameters<typeof workerFetch>[1];
 }
 
-function signedStatus(repository: string, sha: string): Request {
+function signedStatus(repository: string, sha: string, deliveryId = crypto.randomUUID()): Request {
   const body = JSON.stringify({
     ...statusFixture,
-    repository: { full_name: repository },
+    repository: { id: 1, full_name: repository },
     sha,
   });
   const signature = createHmac("sha256", webhookSecret).update(body).digest("hex");
@@ -26,6 +27,7 @@ function signedStatus(repository: string, sha: string): Request {
     method: "POST",
     headers: {
       "content-type": "application/json",
+      "x-github-delivery": deliveryId,
       "x-github-event": "status",
       "x-hub-signature-256": `sha256=${signature}`,
     },
@@ -125,6 +127,141 @@ describe("GitHub status gateway", () => {
     expect(response.status).toBe(401);
   });
 
+  it("acknowledges a duplicate delivery without allocating another cursor or wake", async () => {
+    const repository = "duplicate/repo";
+    const socket = await watcher(repository);
+    const ready = nextMessage(socket);
+    register(socket, repository, "duplicate-head", null);
+    expect(await ready).toMatchObject({ type: "ready", cursor: 0 });
+
+    const wake = nextMessage(socket);
+    expect(
+      (await exports.default.fetch(signedStatus(repository, "duplicate-head", "same-id"))).status,
+    ).toBe(202);
+    expect(await wake).toMatchObject({ type: "wake", cursor: 1 });
+    expect(
+      (await exports.default.fetch(signedStatus(repository, "duplicate-head", "same-id"))).status,
+    ).toBe(202);
+
+    const resumed = await watcher(repository);
+    const resumedReady = nextMessage(resumed);
+    register(resumed, repository, "duplicate-head", 1);
+    expect(await resumedReady).toMatchObject({ type: "ready", cursor: 1 });
+    socket.close();
+    resumed.close();
+  });
+
+  it("emits the leading and final wake of a related burst within two seconds", async () => {
+    const repository = "debounce/repo";
+    const socket = await watcher(repository);
+    const ready = nextMessage(socket);
+    register(socket, repository, "debounce-head", null);
+    expect(await ready).toMatchObject({ type: "ready", cursor: 0 });
+
+    const wakes: number[] = [];
+    socket.addEventListener("message", ({ data }) => {
+      const frame = JSON.parse(String(data)) as { type?: string; cursor?: number };
+      if (frame.type === "wake" && typeof frame.cursor === "number") wakes.push(frame.cursor);
+    });
+    for (const [headOid, deliveryId] of [
+      ["debounce-head", "burst-first"],
+      ["intermediate-head", "burst-middle"],
+      ["final-head", "burst-final"],
+    ]) {
+      expect(
+        (await exports.default.fetch(signedStatus(repository, headOid, deliveryId))).status,
+      ).toBe(202);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(wakes).toEqual([1]);
+    await expect.poll(() => wakes, { timeout: DEBOUNCE_WINDOW_MS + 1_000 }).toEqual([1, 3]);
+    socket.close();
+  });
+
+  it("stores only compact wake metadata and serializes concurrent duplicate delivery", async () => {
+    const repository = "privacy/repo";
+    const first = signedStatus(repository, "privacy-head", "concurrent-id");
+    const second = signedStatus(repository, "privacy-head", "concurrent-id");
+    const responses = await Promise.all([
+      exports.default.fetch(first),
+      exports.default.fetch(second),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([202, 202]);
+
+    const stub = env.REPOSITORY_GATEWAY.get(env.REPOSITORY_GATEWAY.idFromName(repository));
+    await runInDurableObject(stub, (_, state) => {
+      const columns = state.storage.sql
+        .exec<{ name: string }>("PRAGMA table_info(wake_events)")
+        .toArray()
+        .map((column) => column.name);
+      const wake = state.storage.sql
+        .exec<Record<string, unknown>>("SELECT * FROM wake_events")
+        .one();
+      expect(columns).toEqual([
+        "cursor",
+        "delivery_id",
+        "kind",
+        "repository_id",
+        "pr_number",
+        "head_oid",
+        "received_at_ms",
+      ]);
+      expect(wake).toMatchObject({
+        cursor: 1,
+        delivery_id: "concurrent-id",
+        kind: "status",
+        repository_id: 1,
+        pr_number: null,
+        head_oid: "privacy-head",
+      });
+      expect(Object.keys(wake).sort()).toEqual(columns.slice().sort());
+      expect(state.storage.sql.exec("SELECT delivery_id FROM delivery_dedupe").toArray()).toEqual([
+        { delivery_id: "concurrent-id" },
+      ]);
+    });
+  });
+
+  it("prunes expired delivery IDs with expired wake history before accepting a retry", async () => {
+    const repository = "pruning/repo";
+    const stub = env.REPOSITORY_GATEWAY.get(env.REPOSITORY_GATEWAY.idFromName(repository));
+    const expiredAt = Date.now() - 6 * 60 * 60 * 1000 - 1;
+    await runInDurableObject(stub, (_, state) => {
+      state.storage.sql.exec("UPDATE broker_state SET current_cursor = 8 WHERE id = 1");
+      state.storage.sql.exec(
+        "INSERT INTO wake_events " +
+          "(cursor, delivery_id, kind, repository_id, pr_number, head_oid, received_at_ms) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        8,
+        "expired-id",
+        "status",
+        1,
+        null,
+        "expired-head",
+        expiredAt,
+      );
+      state.storage.sql.exec(
+        "INSERT INTO delivery_dedupe (delivery_id, received_at_ms) VALUES (?, ?)",
+        "expired-id",
+        expiredAt,
+      );
+    });
+
+    expect(
+      (await exports.default.fetch(signedStatus(repository, "new-head", "expired-id"))).status,
+    ).toBe(202);
+    await runInDurableObject(stub, (_, state) => {
+      expect(
+        state.storage.sql.exec<{ cursor: number }>("SELECT cursor FROM wake_events").toArray(),
+      ).toEqual([{ cursor: 9 }]);
+      expect(
+        state.storage.sql
+          .exec<{ delivery_id: string }>("SELECT delivery_id FROM delivery_dedupe")
+          .toArray(),
+      ).toEqual([{ delivery_id: "expired-id" }]);
+    });
+  });
+
   it("sends ready before replaying a retained matching status", async () => {
     const repository = "replay/repo";
     expect((await exports.default.fetch(signedStatus(repository, "replay-head"))).status).toBe(202);
@@ -199,6 +336,45 @@ describe("GitHub status gateway", () => {
     const wake = nextMessage(socket);
     expect((await exports.default.fetch(signedStatus(repository, "legacy-head"))).status).toBe(202);
     expect(await wake).toMatchObject({ type: "wake", cursor: 1 });
+    socket.close();
+  });
+
+  it("migrates #10 wake history into the compact schema without losing replay", async () => {
+    const repository = "legacy-history/repo";
+    const stub = env.REPOSITORY_GATEWAY.get(env.REPOSITORY_GATEWAY.idFromName(repository));
+    const receivedAt = Date.now();
+    await runInDurableObject(stub, (_, state) => {
+      state.storage.sql.exec("DROP TABLE delivery_dedupe");
+      state.storage.sql.exec("DROP TABLE wake_events");
+      state.storage.sql.exec("DROP TABLE broker_state");
+      state.storage.sql.exec(
+        "CREATE TABLE broker_state (id INTEGER PRIMARY KEY CHECK (id = 1), " +
+          "current_cursor INTEGER NOT NULL)",
+      );
+      state.storage.sql.exec("INSERT INTO broker_state (id, current_cursor) VALUES (1, 1)");
+      state.storage.sql.exec(
+        "CREATE TABLE wake_events (" +
+          "cursor INTEGER PRIMARY KEY, received_at_ms INTEGER NOT NULL, kind TEXT NOT NULL, " +
+          "head_oid TEXT NOT NULL, pr_number INTEGER, delivery_id TEXT)",
+      );
+      state.storage.sql.exec(
+        "INSERT INTO wake_events (cursor, received_at_ms, kind, head_oid) VALUES (?, ?, ?, ?)",
+        1,
+        receivedAt,
+        "status",
+        "legacy-head",
+      );
+    });
+    await evictDurableObject(stub);
+
+    expect(
+      (await exports.default.fetch(signedStatus(repository, "new-head", "new-id"))).status,
+    ).toBe(202);
+    const socket = await watcher(repository);
+    const ready = nextMessage(socket);
+    register(socket, repository, "legacy-head", 0);
+    expect(await ready).toMatchObject({ type: "ready", cursor: 2 });
+    expect(await nextMessage(socket)).toMatchObject({ type: "replay", cursor: 1 });
     socket.close();
   });
 

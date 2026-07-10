@@ -2,6 +2,6 @@
   "state": "pending",
   "context": "ci/test",
   "description": "fixture status update",
-  "repository": { "full_name": "OWNER/REPOSITORY" },
+  "repository": { "id": 1, "full_name": "OWNER/REPOSITORY" },
   "sha": "HEAD_OID"
 }

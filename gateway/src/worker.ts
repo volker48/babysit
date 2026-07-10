@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { WakeHistory } from "./replay";
+import { type StoredWake, type WakeInput, WakeHistory } from "./replay";
 
 interface Env {
   REPOSITORY_GATEWAY: DurableObjectNamespace<RepositoryGateway>;
@@ -44,10 +44,19 @@ export class RepositoryGateway extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get("Upgrade") === "websocket") return this.acceptWatcher(request);
     if (request.method !== "POST") return new Response("not found", { status: 404 });
-    const status = await request.json<{ headOid?: unknown }>();
-    if (typeof status.headOid !== "string") return new Response("bad status", { status: 400 });
-    this.publish(status.headOid);
+    const wake = parseWakeInput(await request.json<unknown>());
+    if (!wake) return new Response("bad wake", { status: 400 });
+    await this.publish(wake);
     return new Response(null, { status: 202 });
+  }
+
+  async alarm(): Promise<void> {
+    const trailing = this.history.takeTrailingWake(Date.now());
+    if (trailing.alarmAt !== null) {
+      await this.ctx.storage.setAlarm(trailing.alarmAt);
+      return;
+    }
+    if (trailing.wake) this.broadcast(trailing.wake, true);
   }
 
   webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): void {
@@ -83,11 +92,20 @@ export class RepositoryGateway extends DurableObject<Env> {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  private publish(headOid: string): void {
-    const cursor = this.history.append(headOid, Date.now());
+  private async publish(input: WakeInput): Promise<void> {
+    const accepted = this.history.accept(input, Date.now());
+    if (accepted.alarmAt !== null) await this.ctx.storage.setAlarm(accepted.alarmAt);
+    if (accepted.wake) this.broadcast(accepted.wake);
+  }
+
+  private broadcast(wake: StoredWake, repositoryWide = false): void {
     for (const socket of this.ctx.getWebSockets()) {
-      if (attachmentHeadOid(socket.deserializeAttachment()) === headOid) {
-        socket.send(frame("wake", cursor));
+      if (
+        repositoryWide ||
+        wake.headOid === null ||
+        attachmentHeadOid(socket.deserializeAttachment()) === wake.headOid
+      ) {
+        socket.send(frame("wake", wake.cursor));
       }
     }
   }
@@ -100,14 +118,16 @@ async function receiveWebhook(request: Request, env: Env): Promise<Response> {
   if (!(await hasValidSignature(body, signature, env.WEBHOOK_SECRET))) {
     return new Response("invalid signature", { status: 401 });
   }
-  if (request.headers.get("X-GitHub-Event") !== "status")
+  if (request.headers.get("X-GitHub-Event") !== "status") {
     return new Response(null, { status: 202 });
-  const status = normalizeStatus(decoder.decode(body));
+  }
+  const deliveryId = request.headers.get("X-GitHub-Delivery");
+  const status = normalizeStatus(decoder.decode(body), deliveryId);
   if (!status) return new Response("invalid status payload", { status: 400 });
   const id = env.REPOSITORY_GATEWAY.idFromName(status.repository);
   return env.REPOSITORY_GATEWAY.get(id).fetch("https://repository-gateway/status", {
     method: "POST",
-    body: JSON.stringify(status),
+    body: JSON.stringify(status.wake),
   });
 }
 
@@ -154,16 +174,68 @@ function isConfiguredSecret(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
-function normalizeStatus(body: string): { repository: string; headOid: string } | null {
+function normalizeStatus(
+  body: string,
+  deliveryId: string | null,
+): { repository: string; wake: WakeInput } | null {
   try {
-    const value = JSON.parse(body) as { repository?: { full_name?: unknown }; sha?: unknown };
-    if (typeof value.repository?.full_name !== "string" || typeof value.sha !== "string") {
+    const value = JSON.parse(body) as {
+      repository?: { full_name?: unknown; id?: unknown };
+      sha?: unknown;
+    };
+    if (
+      typeof value.repository?.full_name !== "string" ||
+      !isPositiveInteger(value.repository.id) ||
+      typeof value.sha !== "string" ||
+      value.sha.length === 0 ||
+      !isNonEmptyString(deliveryId)
+    ) {
       return null;
     }
-    return { repository: value.repository.full_name, headOid: value.sha };
+    return {
+      repository: value.repository.full_name,
+      wake: {
+        deliveryId,
+        kind: "status",
+        repositoryId: value.repository.id,
+        prNumber: null,
+        headOid: value.sha,
+      },
+    };
   } catch {
     return null;
   }
+}
+
+function parseWakeInput(value: unknown): WakeInput | null {
+  if (!value || typeof value !== "object") return null;
+  const wake = value as Partial<WakeInput>;
+  if (
+    !isNonEmptyString(wake.deliveryId) ||
+    wake.kind !== "status" ||
+    !isPositiveInteger(wake.repositoryId) ||
+    !isNullablePositiveInteger(wake.prNumber) ||
+    !isNullableString(wake.headOid)
+  ) {
+    return null;
+  }
+  return wake as WakeInput;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function isNullablePositiveInteger(value: unknown): value is number | null {
+  return value === null || isPositiveInteger(value);
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
 }
 
 function parseRegistration(message: string): Registration | null {
