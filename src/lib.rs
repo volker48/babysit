@@ -4,3 +4,4 @@ pub mod core;
 pub mod forge;
 pub mod github;
 pub mod gitlab;
+pub mod wait;
