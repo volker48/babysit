@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { DEBOUNCE_WINDOW_MS, WAKE_RETENTION_MS, WakeHistory } from "../src/replay";
+import { DEBOUNCE_WINDOW_MS, WAKE_RETENTION_MS, WakeHistory, type WakeIntent } from "../src/replay";
 import type { WakeEvent } from "../src/wake";
 import { RepositoryGateway } from "../src/worker";
 
@@ -73,6 +73,47 @@ describe("durable wake delivery", () => {
         resync: false,
       });
       expect(tableColumns(state, "wake_events")).not.toContain("repository_full_name");
+    });
+  });
+
+  it("migrates intermediate outbox rows without repository names", async () => {
+    const repository = "outbox-schema-migration";
+    await withHistory(repository, (_, state) => {
+      state.storage.sql.exec("DROP TABLE wake_outbox");
+      state.storage.sql.exec(
+        "CREATE TABLE wake_outbox (cursor INTEGER PRIMARY KEY, retry_at_ms INTEGER NOT NULL, " +
+          "received_at_ms INTEGER NOT NULL, kind TEXT NOT NULL, delivery_id TEXT NOT NULL, " +
+          "repository_id TEXT NOT NULL, repository_full_name TEXT NOT NULL, pr_number INTEGER, " +
+          "head_oid TEXT)",
+      );
+      state.storage.sql.exec(
+        "INSERT INTO wake_outbox VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        7,
+        base,
+        base,
+        "status",
+        "outbox-delivery",
+        "100",
+        "owner/private",
+        7,
+        "head",
+      );
+    });
+    await evictDurableObject(stub(repository));
+    await withHistory(repository, async (history, state) => {
+      expect(tableColumns(state, "wake_outbox")).toEqual([
+        "cursor",
+        "retry_at_ms",
+        "received_at_ms",
+        "kind",
+        "delivery_id",
+        "repository_id",
+        "pr_number",
+        "head_oid",
+      ]);
+      const sent: WakeIntent[] = [];
+      await history.deliver(base, (intent) => sent.push(intent));
+      expect(sent).toMatchObject([{ cursor: 7, wake: { deliveryId: "outbox-delivery" } }]);
     });
   });
 

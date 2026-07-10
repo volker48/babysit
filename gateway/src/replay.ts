@@ -3,6 +3,16 @@ import { type WakeEvent, type WakeRegistration, matchesWake, selectWakeRoute } f
 export const WAKE_RETENTION_MS = 6 * 60 * 60 * 1000;
 export const DEBOUNCE_WINDOW_MS = 2_000;
 const RETRY_DELAY_MS = 1_000;
+const OUTBOX_COLUMNS = [
+  "cursor",
+  "retry_at_ms",
+  "received_at_ms",
+  "kind",
+  "delivery_id",
+  "repository_id",
+  "pr_number",
+  "head_oid",
+];
 
 interface StoredWake {
   [key: string]: SqlStorageValue;
@@ -48,6 +58,7 @@ export class WakeHistory {
   constructor(private readonly storage: DurableObjectStorage) {
     this.createTables();
     this.migrateWakeSchema();
+    this.migrateOperationalSchemas();
     this.initializeLegacyIntents();
     this.dedupeExistingHistory();
     this.storage.sql.exec(
@@ -172,6 +183,25 @@ export class WakeHistory {
         "FROM wake_events_legacy",
     );
     this.storage.sql.exec("DROP TABLE wake_events_legacy");
+  }
+
+  private migrateOperationalSchemas(): void {
+    const columns = this.tableColumns("wake_outbox");
+    if (sameColumns(columns, OUTBOX_COLUMNS)) return;
+    this.storage.transactionSync(() => this.rebuildOutbox(columns));
+  }
+
+  private rebuildOutbox(columns: string[]): void {
+    this.storage.sql.exec("ALTER TABLE wake_outbox RENAME TO wake_outbox_legacy");
+    this.createTables();
+    if (OUTBOX_COLUMNS.every((column) => columns.includes(column))) {
+      this.storage.sql.exec(
+        "INSERT INTO wake_outbox (cursor, retry_at_ms, received_at_ms, kind, delivery_id, " +
+          "repository_id, pr_number, head_oid) SELECT cursor, retry_at_ms, received_at_ms, kind, " +
+          "delivery_id, repository_id, pr_number, head_oid FROM wake_outbox_legacy",
+      );
+    }
+    this.storage.sql.exec("DROP TABLE wake_outbox_legacy");
   }
 
   private initializeLegacyIntents(): void {
@@ -424,6 +454,10 @@ export class WakeHistory {
       .toArray()
       .map((column) => column.name);
   }
+}
+
+function sameColumns(actual: string[], expected: string[]): boolean {
+  return actual.length === expected.length && expected.every((column) => actual.includes(column));
 }
 
 function routeKey(wake: WakeEvent): string {
