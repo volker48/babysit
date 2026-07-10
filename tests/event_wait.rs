@@ -112,7 +112,7 @@ impl GatewaySocketFactory for RetryThenReadyFactory {
     ) -> Result<Box<dyn GatewaySocket>, GatewayError> {
         let next = *self.attempts.borrow() + 1;
         let attempt = self.attempts.replace(next);
-        if attempt == 1 {
+        if matches!(attempt, 1 | 3) {
             return Ok(Box::new(ScriptedSocket {
                 received: self.received.clone(),
                 sent: self.sent.clone(),
@@ -434,6 +434,7 @@ fn successful_registration_resets_the_next_retry_delay() {
     let runtime = Rc::new(FakeRuntime::new());
     let received = Rc::new(RefCell::new(VecDeque::from([
         r#"{"type":"ready","version":1,"cursor":1}"#.to_string(),
+        r#"{"type":"ready","version":1,"cursor":2}"#.to_string(),
     ])));
     let mut source = EventWakeSource::with_runtime(
         GatewayConfig::parse("wss://gateway.example/watch").unwrap(),
@@ -455,15 +456,13 @@ fn successful_registration_resets_the_next_retry_delay() {
         babysit::wait::SnapshotAction::Wait
     );
     babysit::wait::WakeSource::wait(&mut source, Duration::from_secs(30)).unwrap();
-    assert_eq!(
-        babysit::wait::WakeSource::observe_snapshot(&mut source, &open, Duration::from_secs(59))
-            .unwrap(),
-        babysit::wait::SnapshotAction::RefetchNow
-    );
     let mut changed = open.clone();
     changed.head_oid = "new-head".to_string();
-    babysit::wait::WakeSource::observe_snapshot(&mut source, &changed, Duration::from_secs(59))
-        .unwrap();
+    assert_eq!(
+        babysit::wait::WakeSource::observe_snapshot(&mut source, &changed, Duration::from_secs(59))
+            .unwrap(),
+        babysit::wait::SnapshotAction::Wait
+    );
     babysit::wait::WakeSource::wait(&mut source, Duration::from_secs(30)).unwrap();
 
     assert_eq!(
@@ -473,8 +472,9 @@ fn successful_registration_resets_the_next_retry_delay() {
 }
 
 #[test]
-fn retry_backoff_is_exponential_capped_by_the_overall_deadline() {
+fn repeated_reconnect_failures_wait_for_the_full_fallback_before_refetching() {
     let runtime = Rc::new(FakeRuntime::new());
+    let start = *runtime.now.borrow();
     let mut source = EventWakeSource::with_runtime(
         GatewayConfig::parse("wss://gateway.example/watch").unwrap(),
         Box::new(MemoryStore(
@@ -484,34 +484,66 @@ fn retry_backoff_is_exponential_capped_by_the_overall_deadline() {
         Box::new(SharedRuntime(runtime.clone())),
     )
     .unwrap();
-    let mut fetches = 0;
+    let mut fetch_times = Vec::new();
     let outcome = wait_until_settled(
         &mut |_| {
-            fetches += 1;
+            fetch_times.push(*runtime.now.borrow());
             Ok(snapshot("OPEN"))
         },
         &mut source,
-        Duration::from_secs(100),
+        Duration::from_secs(601),
         Duration::from_secs(300),
         &SettleOptions::default(),
     )
     .unwrap();
 
     assert!(matches!(outcome, WaitOutcome::TimedOut { .. }));
-    assert_eq!(fetches, 8);
     assert_eq!(
-        *runtime.sleeps.borrow(),
+        fetch_times,
         [
-            Duration::from_secs(1),
-            Duration::from_secs(2),
-            Duration::from_secs(4),
-            Duration::from_secs(8),
-            Duration::from_secs(16),
-            Duration::from_secs(30),
-            Duration::from_secs(30),
-            Duration::from_secs(9),
+            start,
+            start + Duration::from_secs(300),
+            start + Duration::from_secs(600),
         ]
     );
+}
+
+#[test]
+fn successful_reconnect_requests_an_immediate_authoritative_fetch() {
+    let runtime = Rc::new(FakeRuntime::new());
+    let start = *runtime.now.borrow();
+    let received = Rc::new(RefCell::new(VecDeque::from([
+        r#"{"type":"ready","version":1,"cursor":1}"#.to_string(),
+    ])));
+    let mut source = EventWakeSource::with_runtime(
+        GatewayConfig::parse("wss://gateway.example/watch").unwrap(),
+        Box::new(MemoryStore(
+            SecretToken::new("test-token".to_string()).unwrap(),
+        )),
+        Box::new(RetryThenReadyFactory {
+            attempts: RefCell::new(0),
+            received,
+            sent: Rc::new(RefCell::new(Vec::new())),
+        }),
+        Box::new(SharedRuntime(runtime.clone())),
+    )
+    .unwrap();
+    let mut fetch_times = Vec::new();
+    let mut states = ["OPEN", "CLOSED"].into_iter();
+    let outcome = wait_until_settled(
+        &mut |_| {
+            fetch_times.push(*runtime.now.borrow());
+            Ok(snapshot(states.next().unwrap()))
+        },
+        &mut source,
+        Duration::from_secs(60),
+        Duration::from_secs(30),
+        &SettleOptions::default(),
+    )
+    .unwrap();
+
+    assert!(matches!(outcome, WaitOutcome::Settled { .. }));
+    assert_eq!(fetch_times, [start, start + Duration::from_secs(1)]);
 }
 
 #[test]

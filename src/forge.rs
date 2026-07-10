@@ -142,7 +142,7 @@ fn command_output(
     context: &str,
     deadline: Option<Instant>,
 ) -> Result<Output, CliError> {
-    let deadline = deadline.unwrap_or_else(|| Instant::now() + CLI_TIMEOUT);
+    let deadline = command_deadline(Instant::now(), deadline)?;
     if Instant::now() >= deadline {
         return Err(timeout_error(context));
     }
@@ -184,6 +184,13 @@ fn command_output(
         }
         sleep(Duration::from_millis(50));
     }
+}
+
+fn command_deadline(now: Instant, overall: Option<Instant>) -> Result<Instant, CliError> {
+    let command = now
+        .checked_add(CLI_TIMEOUT)
+        .ok_or_else(|| CliError::new("command deadline is too large", false))?;
+    Ok(overall.map_or(command, |deadline| deadline.min(command)))
 }
 
 fn timeout_error(context: &str) -> CliError {
@@ -317,4 +324,20 @@ fn remote_host(remote_url: &str) -> String {
         .next()
         .unwrap_or(remote_url)
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_overall_deadline_still_caps_a_subprocess_at_cli_timeout() {
+        let now = Instant::now();
+        let overall = now.checked_add(Duration::from_secs(3600)).unwrap();
+
+        assert_eq!(
+            command_deadline(now, Some(overall)).unwrap(),
+            now.checked_add(CLI_TIMEOUT).unwrap()
+        );
+    }
 }

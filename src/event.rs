@@ -65,6 +65,23 @@ impl GatewayConfig {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct WatchRegistration {
+    repository: String,
+    number: u64,
+    head_oid: String,
+}
+
+impl WatchRegistration {
+    fn from_snapshot(snapshot: &PrSnapshot) -> Self {
+        Self {
+            repository: format!("{}/{}", snapshot.owner, snapshot.repo),
+            number: snapshot.number,
+            head_oid: snapshot.head_oid.clone(),
+        }
+    }
+}
+
 /// A WebSocket adapter boundary; event data is only used to request a new snapshot.
 pub trait GatewaySocket {
     fn send_text(&mut self, value: String, timeout: Duration) -> Result<(), GatewayError>;
@@ -102,7 +119,7 @@ pub struct EventWakeSource {
     store: Box<dyn TokenStore>,
     factory: Box<dyn GatewaySocketFactory>,
     socket: Option<Box<dyn GatewaySocket>>,
-    head_oid: Option<String>,
+    watch: Option<WatchRegistration>,
     ready_cursor: Option<u64>,
     last_seen: Option<u64>,
     pending_refetch: bool,
@@ -138,7 +155,7 @@ impl EventWakeSource {
             store,
             factory,
             socket: None,
-            head_oid: None,
+            watch: None,
             ready_cursor: None,
             last_seen: None,
             pending_refetch: false,
@@ -147,7 +164,7 @@ impl EventWakeSource {
         })
     }
 
-    fn register(&mut self, snapshot: &PrSnapshot, remaining: Duration) -> Result<(), CliError> {
+    fn register(&mut self, watch: &WatchRegistration, remaining: Duration) -> Result<(), CliError> {
         let deadline = self
             .runtime
             .now()
@@ -161,7 +178,7 @@ impl EventWakeSource {
             .map_err(GatewayError::cli_error)?;
         let timeout = self.remaining(deadline)?;
         socket
-            .send_text(register_frame(snapshot, self.last_seen)?, timeout)
+            .send_text(register_frame(watch, self.last_seen)?, timeout)
             .map_err(GatewayError::cli_error)?;
         let timeout = self.remaining(deadline)?;
         let ready = socket.read_text(timeout).map_err(GatewayError::cli_error)?;
@@ -184,18 +201,79 @@ impl EventWakeSource {
         Ok(remaining)
     }
 
-    fn connect_and_register(
-        &mut self,
-        snapshot: &PrSnapshot,
-        remaining: Duration,
-    ) -> Result<(), CliError> {
-        match self.register(snapshot, remaining) {
+    fn connect_and_register(&mut self, remaining: Duration) -> Result<(), CliError> {
+        let watch = self
+            .watch
+            .clone()
+            .expect("watch is set before registration");
+        match self.register(&watch, remaining) {
             Ok(()) => Ok(()),
             Err(error) if error.retryable => {
                 self.socket = None;
                 Ok(())
             }
             Err(error) => Err(error),
+        }
+    }
+
+    fn retry_connection(&mut self, deadline: Instant) -> Result<Option<bool>, CliError> {
+        let remaining = deadline.saturating_duration_since(self.runtime.now());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        self.connect_and_register(remaining)?;
+        Ok(Some(self.socket.is_some()))
+    }
+
+    fn sleep_before_retry(&mut self, deadline: Instant) -> bool {
+        let remaining = deadline.saturating_duration_since(self.runtime.now());
+        if remaining.is_zero() {
+            return false;
+        }
+        self.runtime
+            .sleep(remaining.min(self.runtime.jitter(self.retry_delay)));
+        self.retry_delay = next_retry_delay(self.retry_delay);
+        true
+    }
+
+    fn sleep_until(&self, deadline: Instant) {
+        let remaining = deadline.saturating_duration_since(self.runtime.now());
+        if !remaining.is_zero() {
+            self.runtime.sleep(remaining);
+        }
+    }
+
+    fn reconnect_during_wait(&mut self, deadline: Instant) -> Result<bool, CliError> {
+        if !self.sleep_before_retry(deadline) {
+            return Ok(true);
+        }
+        Ok(self.retry_connection(deadline)?.unwrap_or(true))
+    }
+
+    fn wait_for_socket(&mut self, deadline: Instant) -> Result<bool, CliError> {
+        let remaining = deadline.saturating_duration_since(self.runtime.now());
+        if remaining.is_zero() {
+            return Ok(true);
+        }
+        let result = self
+            .socket
+            .as_mut()
+            .expect("socket was checked")
+            .read_text(remaining);
+        match result {
+            Ok(Some(message)) => {
+                self.handle_message(&message)?;
+                Ok(self.pending_refetch)
+            }
+            Ok(None) => {
+                self.sleep_until(deadline);
+                Ok(true)
+            }
+            Err(GatewayError::Fatal(message)) => Err(CliError::new(message, false)),
+            Err(GatewayError::Retryable) => {
+                self.socket = None;
+                Ok(false)
+            }
         }
     }
 
@@ -218,35 +296,26 @@ impl WakeSource for EventWakeSource {
     }
 
     fn wait(&mut self, duration: Duration) -> Result<(), CliError> {
-        if self.socket.is_none() {
-            let delay = duration.min(self.runtime.jitter(self.retry_delay));
-            self.runtime.sleep(delay);
-            self.retry_delay = next_retry_delay(self.retry_delay);
+        let deadline = self
+            .runtime
+            .now()
+            .checked_add(duration)
+            .ok_or_else(deadline_error)?;
+        if self.watch.is_none() {
+            self.runtime.sleep(duration);
             return Ok(());
         }
-        let deadline = self.runtime.now() + duration;
         loop {
-            let remaining = deadline.saturating_duration_since(self.runtime.now());
-            if remaining.is_zero() {
+            if self.runtime.now() >= deadline {
                 return Ok(());
             }
-            let result = self
-                .socket
-                .as_mut()
-                .expect("socket was checked")
-                .read_text(remaining);
-            match result {
-                Ok(Some(message)) => match self.handle_message(&message) {
-                    Ok(()) if !self.pending_refetch => continue,
-                    Ok(()) => return Ok(()),
-                    Err(error) => return Err(error),
-                },
-                Ok(None) => return Ok(()),
-                Err(GatewayError::Fatal(message)) => return Err(CliError::new(message, false)),
-                Err(GatewayError::Retryable) => {
-                    self.socket = None;
-                    return Ok(());
-                }
+            let woke = if self.socket.is_none() {
+                self.reconnect_during_wait(deadline)?
+            } else {
+                self.wait_for_socket(deadline)?
+            };
+            if woke {
+                return Ok(());
             }
         }
     }
@@ -256,11 +325,11 @@ impl WakeSource for EventWakeSource {
         snapshot: &PrSnapshot,
         remaining: Duration,
     ) -> Result<SnapshotAction, CliError> {
-        let changed_head = self.head_oid.as_deref() != Some(&snapshot.head_oid);
-        if self.socket.is_none() || changed_head {
-            self.head_oid = Some(snapshot.head_oid.clone());
+        let watch = WatchRegistration::from_snapshot(snapshot);
+        if self.socket.is_none() || self.watch.as_ref() != Some(&watch) {
+            self.watch = Some(watch);
             self.ready_cursor = None;
-            self.connect_and_register(snapshot, remaining)?;
+            self.connect_and_register(remaining)?;
             return Ok(if self.socket.is_some() {
                 SnapshotAction::RefetchNow
             } else {
@@ -303,16 +372,16 @@ fn jittered_delay(maximum: Duration) -> Duration {
     Duration::from_millis(rand::rng().random_range(1..=milliseconds.max(1)))
 }
 
-fn register_frame(snapshot: &PrSnapshot, after: Option<u64>) -> Result<String, CliError> {
+fn register_frame(watch: &WatchRegistration, after: Option<u64>) -> Result<String, CliError> {
     serde_json::to_string(&serde_json::json!({
         "type": "register",
         "version": PROTOCOL_VERSION,
         "watch": {
             "forge": "github",
             "host": "github.com",
-            "repository": format!("{}/{}", snapshot.owner, snapshot.repo),
-            "number": snapshot.number,
-            "headOid": snapshot.head_oid,
+            "repository": watch.repository,
+            "number": watch.number,
+            "headOid": watch.head_oid,
         },
         "after": after,
     }))
