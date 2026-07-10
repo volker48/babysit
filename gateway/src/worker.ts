@@ -21,15 +21,15 @@ const decoder = new TextDecoder();
 const encoder = new TextEncoder();
 const historyLimit = 100;
 
-export default {
-  async fetch(request, env): Promise<Response> {
-    const url = new URL(request.url);
-    if (url.pathname === "/webhooks/github") return receiveWebhook(request, env);
-    const repository = repositoryFromWatchPath(url.pathname);
-    if (repository) return connectWatcher(request, env, repository);
-    return new Response("not found", { status: 404 });
-  },
-} satisfies ExportedHandler<Env>;
+export async function fetch(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  if (url.pathname === "/webhooks/github") return receiveWebhook(request, env);
+  const repository = repositoryFromWatchPath(url.pathname);
+  if (repository) return connectWatcher(request, env, repository);
+  return new Response("not found", { status: 404 });
+}
+
+export default { fetch } satisfies ExportedHandler<Env>;
 
 export class RepositoryGateway extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
@@ -100,6 +100,7 @@ export class RepositoryGateway extends DurableObject<Env> {
 }
 
 async function receiveWebhook(request: Request, env: Env): Promise<Response> {
+  if (!isConfiguredSecret(env.WEBHOOK_SECRET)) return unavailable();
   const body = await request.arrayBuffer();
   const signature = request.headers.get("X-Hub-Signature-256");
   if (!(await hasValidSignature(body, signature, env.WEBHOOK_SECRET))) {
@@ -121,6 +122,7 @@ function connectWatcher(
   env: Env,
   repository: string,
 ): Promise<Response> | Response {
+  if (!isConfiguredSecret(env.WATCHER_TOKEN)) return unavailable();
   if (request.headers.get("Authorization") !== `Bearer ${env.WATCHER_TOKEN}`) {
     return new Response("unauthorized", { status: 401 });
   }
@@ -132,6 +134,14 @@ function connectWatcher(
   headers.set("X-Gateway-Repository", repository);
   const forwarded = new Request(request, { headers });
   return env.REPOSITORY_GATEWAY.get(env.REPOSITORY_GATEWAY.idFromName(repository)).fetch(forwarded);
+}
+
+function unavailable(): Response {
+  return new Response("gateway unavailable", { status: 503 });
+}
+
+function isConfiguredSecret(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
 }
 
 function normalizeStatus(body: string): { repository: string; headOid: string } | null {

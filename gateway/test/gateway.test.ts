@@ -1,9 +1,18 @@
 import { SELF } from "cloudflare:test";
 import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { fetch as workerFetch } from "../src/worker";
 import statusFixture from "./fixtures/github-status.json";
 
 const webhookSecret = "webhook-test-secret";
+
+function missingBindingEnv(): Parameters<typeof workerFetch>[1] {
+  return {
+    REPOSITORY_GATEWAY: undefined,
+    WATCHER_TOKEN: "watcher-test-token",
+    WEBHOOK_SECRET: "webhook-test-secret",
+  } as unknown as Parameters<typeof workerFetch>[1];
+}
 
 function signedStatus(repository: string, sha: string): Request {
   const body = JSON.stringify({
@@ -101,6 +110,24 @@ describe("GitHub status gateway", () => {
     expect(missing.status).toBe(401);
     expect(invalid.status).toBe(401);
     expect(malformed.status).toBe(401);
+  });
+
+  it("fails closed when watcher or webhook secret bindings are absent or empty", async () => {
+    for (const token of [undefined, ""]) {
+      const env = missingBindingEnv();
+      env.WATCHER_TOKEN = token as never;
+      const response = await workerFetch(new Request("https://gateway.test/watch/auth/repo"), env);
+      expect(response.status).toBe(503);
+    }
+    for (const secret of [undefined, ""]) {
+      const env = missingBindingEnv();
+      env.WEBHOOK_SECRET = secret as never;
+      const response = await workerFetch(
+        new Request("https://gateway.test/webhooks/github", { method: "POST", body: "not json" }),
+        env,
+      );
+      expect(response.status).toBe(503);
+    }
   });
 
   it("rejects an unauthenticated watcher", async () => {

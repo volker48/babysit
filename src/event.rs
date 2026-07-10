@@ -51,19 +51,35 @@ pub struct GatewayConfig {
 impl GatewayConfig {
     pub fn parse(value: &str) -> Result<Self, CliError> {
         let url = Url::parse(value)
-            .map_err(|_| CliError::new("--gateway-url must be a valid wss URL", false))?;
+            .map_err(|_| CliError::new("--gateway-url must be wss://host/watch", false))?;
         if url.scheme() != "wss"
             || url.host_str().is_none()
+            || url.path() != "/watch"
             || !url.username().is_empty()
             || url.password().is_some()
             || url.query().is_some()
             || url.fragment().is_some()
         {
             return Err(CliError::new(
-                "--gateway-url must be a plain wss URL",
+                "--gateway-url must be wss://host/watch",
                 false,
             ));
         }
+        Ok(Self { url })
+    }
+
+    fn for_watch(&self, watch: &WatchRegistration) -> Result<Self, CliError> {
+        let (owner, repository) = watch
+            .repository
+            .split_once('/')
+            .ok_or_else(protocol_error)?;
+        let mut url = self.url.clone();
+        let mut segments = url.path_segments_mut().map_err(|_| protocol_error())?;
+        segments.clear();
+        segments.push("watch");
+        segments.push(owner);
+        segments.push(repository);
+        drop(segments);
         Ok(Self { url })
     }
 }
@@ -174,10 +190,11 @@ impl EventWakeSource {
             .checked_add(remaining.min(REGISTRATION_ATTEMPT_CAP))
             .ok_or_else(deadline_error)?;
         let token = self.store.load()?.ok_or_else(missing_token)?;
+        let socket_config = self.config.for_watch(watch)?;
         let timeout = self.remaining(deadline)?;
         let mut socket = self
             .factory
-            .connect(&self.config, token.expose(), timeout)
+            .connect(&socket_config, token.expose(), timeout)
             .map_err(GatewayError::cli_error)?;
         let timeout = self.remaining(deadline)?;
         socket
@@ -707,6 +724,23 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+
+    #[test]
+    fn builds_repository_socket_path_with_percent_encoded_segments() {
+        let config = GatewayConfig::parse("wss://gateway.example/watch").unwrap();
+        let watch = WatchRegistration {
+            repository: "owner name/repo?#".to_string(),
+            number: 1,
+            head_oid: "head".to_string(),
+        };
+
+        let socket = config.for_watch(&watch).unwrap();
+
+        assert_eq!(
+            socket.url.as_str(),
+            "wss://gateway.example/watch/owner%20name/repo%3F%23"
+        );
+    }
 
     #[test]
     fn limits_resolvers_left_running_after_timeout() {

@@ -16,7 +16,7 @@ const webhookSecret = requiredEnv("WEBHOOK_SECRET");
 const babysitBin = process.env.BABYSIT_BIN ?? defaultBabysitBin();
 const realGh = findGh();
 const headOid = fetchHeadOid(realGh, pr, repository);
-const webhookUrl = webhookUrlFor(gatewayUrl, repository);
+const webhookUrl = webhookUrlFor(gatewayUrl);
 const tempDir = await mkdtemp(join(tmpdir(), "babysit-smoke-"));
 const counter = join(tempDir, "gh-pr-view-count");
 let child: ReturnType<typeof spawn> | undefined;
@@ -79,11 +79,10 @@ function fetchHeadOid(gh: string, pr: string, repository: string): string {
   return headOid;
 }
 
-function webhookUrlFor(gateway: string, repository: string): string {
+function webhookUrlFor(gateway: string): string {
   const url = new URL(gateway);
-  const expectedPath = `/watch/${repository.split("/").map(encodeURIComponent).join("/")}`;
-  if (url.protocol !== "wss:" || url.pathname !== expectedPath) {
-    throw new Error("--gateway-url must be wss://host/watch/OWNER/REPO for --repository");
+  if (url.protocol !== "wss:" || url.pathname !== "/watch") {
+    throw new Error("--gateway-url must be wss://host/watch");
   }
   url.protocol = "https:";
   url.pathname = "/webhooks/github";

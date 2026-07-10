@@ -12,13 +12,14 @@ pnpm exec wrangler secret put WATCHER_TOKEN
 ```
 
 Point the GitHub webhook at `https://babysit.mindgoblin.pw/webhooks/github` and use a `status`
-event. Configure CLI clients with `--gateway-url wss://babysit.mindgoblin.pw/watch/OWNER/REPO`.
+event. Configure CLI clients with `--gateway-url wss://babysit.mindgoblin.pw/watch`; the CLI
+adds the authoritative snapshot repository as encoded path segments.
 
 ## Live smoke
 
 The smoke test is for a deployed Worker only. It requires macOS Keychain support, an authenticated
 `gh`, an open PR whose checks/reviews keep it unsettled, a locally built `babysit`, and a gateway
-URL with the exact `/watch/OWNER/REPO` path. It never deploys or creates credentials.
+base URL ending in `/watch`. It never deploys or creates credentials.
 
 Set secrets only in the invoking environment, preferably by reading your credential manager; do not
 place them on a command line or commit them:
@@ -27,7 +28,7 @@ place them on a command line or commit them:
 export WATCHER_TOKEN="$(your-secret-manager read babysit/watcher-token)"
 export WEBHOOK_SECRET="$(your-secret-manager read babysit/webhook-secret)"
 babysit gateway-token enroll
-cd gateway && pnpm smoke --repository OWNER/REPO --pr NUMBER --gateway-url wss://HOST/watch/OWNER/REPO
+cd gateway && pnpm smoke --repository OWNER/REPO --pr NUMBER --gateway-url wss://HOST/watch
 ```
 
 `gateway-token enroll` prompts for the same watcher token without echoing it. `BABYSIT_BIN` can
