@@ -1,4 +1,5 @@
-import { exports } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
+import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { fetch as workerFetch } from "../src/worker";
@@ -147,19 +148,69 @@ describe("GitHub status gateway", () => {
     socket.close();
   });
 
-  it("resyncs when the requested cursor is outside retained history", async () => {
-    const repository = "resync/repo";
-    for (let index = 0; index <= 100; index += 1) {
-      expect((await exports.default.fetch(signedStatus(repository, `head-${index}`))).status).toBe(
-        202,
-      );
-    }
+  it("persists cursor history across Durable Object eviction", async () => {
+    const repository = "eviction/repo";
+    expect((await exports.default.fetch(signedStatus(repository, "same-head"))).status).toBe(202);
+    const stub = env.REPOSITORY_GATEWAY.get(env.REPOSITORY_GATEWAY.idFromName(repository));
+    await evictDurableObject(stub);
+    expect((await exports.default.fetch(signedStatus(repository, "same-head"))).status).toBe(202);
+
     const socket = await watcher(repository);
     const ready = nextMessage(socket);
-    register(socket, repository, "head-100", 0);
+    register(socket, repository, "same-head", 0);
 
-    expect(await ready).toMatchObject({ type: "ready", cursor: 101 });
-    expect(await nextMessage(socket)).toMatchObject({ type: "resync", cursor: 101 });
+    expect(await ready).toMatchObject({ type: "ready", cursor: 2 });
+    expect(await nextMessage(socket)).toMatchObject({ type: "replay", cursor: 1 });
+    expect(await nextMessage(socket)).toMatchObject({ type: "replay", cursor: 2 });
+    socket.close();
+  });
+
+  it("keeps a hibernated watcher's head registration", async () => {
+    const repository = "hibernation/repo";
+    const socket = await watcher(repository);
+    const ready = nextMessage(socket);
+    register(socket, repository, "matching-head", null);
+    expect(await ready).toMatchObject({ type: "ready", cursor: 0 });
+
+    const stub = env.REPOSITORY_GATEWAY.get(env.REPOSITORY_GATEWAY.idFromName(repository));
+    await evictDurableObject(stub);
+    const wake = nextMessage(socket);
+    expect((await exports.default.fetch(signedStatus(repository, "matching-head"))).status).toBe(
+      202,
+    );
+
+    expect(await wake).toMatchObject({ type: "wake", cursor: 1 });
+    socket.close();
+  });
+
+  it("resyncs an expired or unknown cursor after ready", async () => {
+    const repository = "resync/repo";
+    const stub = env.REPOSITORY_GATEWAY.get(env.REPOSITORY_GATEWAY.idFromName(repository));
+    const now = Date.now();
+    await runInDurableObject(stub, (_, state) => {
+      state.storage.sql.exec("UPDATE broker_state SET current_cursor = 8 WHERE id = 1");
+      state.storage.sql.exec(
+        "INSERT INTO wake_events (cursor, received_at_ms, kind, head_oid) VALUES (?, ?, ?, ?)",
+        1,
+        now - 6 * 60 * 60 * 1000 - 1,
+        "status",
+        "expired-head",
+      );
+      state.storage.sql.exec(
+        "INSERT INTO wake_events (cursor, received_at_ms, kind, head_oid) VALUES (?, ?, ?, ?)",
+        8,
+        now,
+        "status",
+        "current-head",
+      );
+    });
+
+    const socket = await watcher(repository);
+    const ready = nextMessage(socket);
+    register(socket, repository, "current-head", 6);
+
+    expect(await ready).toMatchObject({ type: "ready", cursor: 8 });
+    expect(await nextMessage(socket)).toMatchObject({ type: "resync", cursor: 8 });
     socket.close();
   });
 

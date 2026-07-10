@@ -1,14 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
+import { WakeHistory } from "./replay";
 
 interface Env {
   REPOSITORY_GATEWAY: DurableObjectNamespace<RepositoryGateway>;
   WEBHOOK_SECRET: string;
   WATCHER_TOKEN: string;
-}
-
-interface StatusEvent {
-  cursor: number;
-  headOid: string;
 }
 
 interface Registration {
@@ -19,7 +15,10 @@ interface Registration {
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
-const historyLimit = 100;
+interface SocketAttachment {
+  cursor: number;
+  headOid: string;
+}
 
 export async function fetch(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
@@ -32,25 +31,32 @@ export async function fetch(request: Request, env: Env): Promise<Response> {
 export default { fetch } satisfies ExportedHandler<Env>;
 
 export class RepositoryGateway extends DurableObject<Env> {
+  private readonly history = new WakeHistory(this.ctx.storage);
+
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get("Upgrade") === "websocket") return this.acceptWatcher(request);
     if (request.method !== "POST") return new Response("not found", { status: 404 });
-    const status = await request.json<Pick<StatusEvent, "headOid">>();
+    const status = await request.json<{ headOid?: unknown }>();
     if (typeof status.headOid !== "string") return new Response("bad status", { status: 400 });
-    await this.publish(status.headOid);
+    this.publish(status.headOid);
     return new Response(null, { status: 202 });
   }
 
-  async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
+  webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): void {
     if (typeof message !== "string") return socket.close(1003, "text frames required");
     const registration = parseRegistration(message);
     if (!registration || !this.ctx.getTags(socket).includes(registration.repository)) {
       return socket.close(1008, "invalid registration");
     }
-    socket.serializeAttachment(registration.headOid);
-    const current = (await this.ctx.storage.get<number>("cursor")) ?? 0;
-    socket.send(frame("ready", current));
-    await this.replay(socket, registration.after, registration.headOid, current);
+    const resume = this.history.resume(registration.after, registration.headOid, Date.now());
+    const attachment: SocketAttachment = { cursor: resume.cursor, headOid: registration.headOid };
+    socket.serializeAttachment(attachment);
+    socket.send(frame("ready", resume.cursor));
+    if (resume.resync) {
+      socket.send(frame("resync", resume.cursor));
+      return;
+    }
+    for (const cursor of resume.replay) socket.send(frame("replay", cursor));
   }
 
   webSocketClose(socket: WebSocket): void {
@@ -69,32 +75,11 @@ export class RepositoryGateway extends DurableObject<Env> {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  private async publish(headOid: string): Promise<void> {
-    const cursor = ((await this.ctx.storage.get<number>("cursor")) ?? 0) + 1;
-    const event = { cursor, headOid } satisfies StatusEvent;
-    await this.ctx.storage.put({ cursor, [eventKey(cursor)]: event });
-    if (cursor > historyLimit) await this.ctx.storage.delete(eventKey(cursor - historyLimit));
+  private publish(headOid: string): void {
+    const cursor = this.history.append(headOid, Date.now());
     for (const socket of this.ctx.getWebSockets()) {
-      if (socket.deserializeAttachment() === headOid) socket.send(frame("wake", cursor));
-    }
-  }
-
-  private async replay(
-    socket: WebSocket,
-    after: number | null,
-    headOid: string,
-    current: number,
-  ): Promise<void> {
-    if (after === null || after === current) return;
-    if (after > current || after < Math.max(0, current - historyLimit)) {
-      socket.send(frame("resync", current));
-      return;
-    }
-    const events = await this.ctx.storage.list<StatusEvent>({ prefix: "event:" });
-    for (const event of events.values()) {
-      if (event.cursor > after && event.headOid === headOid) {
-        socket.send(frame("replay", event.cursor));
-      }
+      const attachment = socket.deserializeAttachment() as SocketAttachment | null;
+      if (attachment?.headOid === headOid) socket.send(frame("wake", cursor));
     }
   }
 }
@@ -224,10 +209,6 @@ function parseSignature(signature: string | null): Uint8Array | null {
     bytes[index] = Number.parseInt(match[1].slice(index * 2, index * 2 + 2), 16);
   }
   return bytes;
-}
-
-function eventKey(cursor: number): string {
-  return `event:${cursor.toString().padStart(20, "0")}`;
 }
 
 function frame(type: "ready" | "wake" | "replay" | "resync", cursor: number): string {
