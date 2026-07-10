@@ -448,6 +448,7 @@ impl GatewaySocketFactory for TungsteniteFactory {
         token: &str,
         timeout: Duration,
     ) -> Result<Box<dyn GatewaySocket>, GatewayError> {
+        initialize_tls_provider()?;
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or(GatewayError::Retryable)?;
@@ -624,6 +625,16 @@ where
     Err(GatewayError::Retryable)
 }
 
+// Rustls requires a process-wide provider before any TLS client builder is used.
+fn initialize_tls_provider() -> Result<(), GatewayError> {
+    if rustls::crypto::CryptoProvider::get_default().is_some() {
+        return Ok(());
+    }
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .map_err(|_| GatewayError::Fatal("gateway TLS provider failed to initialize"))
+}
+
 fn gateway_request(
     config: &GatewayConfig,
     token: &str,
@@ -724,6 +735,12 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+
+    #[test]
+    fn installs_process_level_tls_provider() {
+        initialize_tls_provider().unwrap();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+    }
 
     #[test]
     fn builds_repository_socket_path_with_percent_encoded_segments() {
