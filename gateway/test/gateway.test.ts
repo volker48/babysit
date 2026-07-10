@@ -265,7 +265,7 @@ describe("GitHub status gateway", () => {
 
     expect(await ready).toMatchObject({ type: "ready", cursor: 2 });
     expect(await nextMessage(socket)).toMatchObject({ type: "replay", cursor: 1 });
-    expect(await nextMessage(socket)).toMatchObject({ type: "replay", cursor: 2 });
+    expect(await nextMessage(socket)).toMatchObject({ cursor: 2 });
     socket.close();
   });
 

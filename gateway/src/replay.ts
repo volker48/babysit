@@ -48,6 +48,7 @@ export class WakeHistory {
   constructor(private readonly storage: DurableObjectStorage) {
     this.createTables();
     this.migrateWakeSchema();
+    this.initializeLegacyIntents();
     this.dedupeExistingHistory();
     this.storage.sql.exec(
       "CREATE UNIQUE INDEX IF NOT EXISTS wake_events_delivery_id ON wake_events (delivery_id) " +
@@ -60,13 +61,13 @@ export class WakeHistory {
 
   async migrateLegacyCursor(): Promise<void> {
     const legacy = await this.storage.get<unknown>("cursor");
-    if (legacy === undefined) return;
     if (typeof legacy === "number" && Number.isSafeInteger(legacy) && legacy >= 0) {
       this.storage.transactionSync(() => {
         if (legacy > this.currentCursor()) this.setCursor(legacy);
       });
     }
-    await this.storage.delete("cursor");
+    if (legacy !== undefined) await this.storage.delete("cursor");
+    await this.schedule(Date.now());
   }
 
   async accept(wake: WakeEvent, now: number): Promise<AcceptResult> {
@@ -103,7 +104,7 @@ export class WakeHistory {
       if (after > cursor || !this.isRetainedCursor(after, cursor)) {
         return { cursor, replay: [], resync: true };
       }
-      const events = this.rowsAfter(after).map(wakeFromRow);
+      const events = this.intentRowsAfter(after).map(wakeFromRow);
       if (events.some((event) => event === null)) return { cursor, replay: [], resync: true };
       const replay = events.flatMap((event) => this.replayCursor(event, registration));
       return { cursor, replay, resync: false };
@@ -142,7 +143,13 @@ export class WakeHistory {
         "received_at_ms INTEGER NOT NULL, kind TEXT NOT NULL, delivery_id TEXT NOT NULL, " +
         "repository_id TEXT NOT NULL, pr_number INTEGER, head_oid TEXT)",
     );
+    this.storage.sql.exec("CREATE TABLE IF NOT EXISTS wake_intents (cursor INTEGER PRIMARY KEY)");
     this.storage.sql.exec("INSERT OR IGNORE INTO broker_state (id, current_cursor) VALUES (1, 0)");
+    if (!this.tableColumns("broker_state").includes("intents_initialized")) {
+      this.storage.sql.exec(
+        "ALTER TABLE broker_state ADD COLUMN intents_initialized INTEGER NOT NULL DEFAULT 0",
+      );
+    }
   }
 
   private migrateWakeSchema(): void {
@@ -167,10 +174,28 @@ export class WakeHistory {
     this.storage.sql.exec("DROP TABLE wake_events_legacy");
   }
 
+  private initializeLegacyIntents(): void {
+    const initialized = this.storage.sql
+      .exec<{ intents_initialized: number }>(
+        "SELECT intents_initialized FROM broker_state WHERE id = 1",
+      )
+      .one().intents_initialized;
+    if (initialized !== 0) return;
+    this.storage.transactionSync(() => {
+      this.storage.sql.exec(
+        "INSERT OR IGNORE INTO wake_intents (cursor) SELECT cursor FROM wake_events",
+      );
+      this.storage.sql.exec("UPDATE broker_state SET intents_initialized = 1 WHERE id = 1");
+    });
+  }
+
   private dedupeExistingHistory(): void {
     this.storage.sql.exec(
       "DELETE FROM wake_events WHERE delivery_id IS NOT NULL AND cursor NOT IN (" +
         "SELECT MIN(cursor) FROM wake_events WHERE delivery_id IS NOT NULL GROUP BY delivery_id)",
+    );
+    this.storage.sql.exec(
+      "DELETE FROM wake_intents WHERE cursor NOT IN (SELECT cursor FROM wake_events)",
     );
   }
 
@@ -214,6 +239,7 @@ export class WakeHistory {
   }
 
   private insertIntent(cursor: number, wake: WakeEvent, retryAt: number): void {
+    this.storage.sql.exec("INSERT OR IGNORE INTO wake_intents (cursor) VALUES (?)", cursor);
     this.storage.sql.exec(
       "INSERT OR IGNORE INTO wake_outbox (cursor, retry_at_ms, received_at_ms, kind, delivery_id, " +
         "repository_id, pr_number, head_oid) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -275,10 +301,20 @@ export class WakeHistory {
   }
 
   private prune(now: number): void {
+    const cutoff = now - WAKE_RETENTION_MS;
+    this.storage.sql.exec("DELETE FROM wake_outbox WHERE received_at_ms <= ?", cutoff);
     this.storage.sql.exec(
-      "DELETE FROM wake_events WHERE received_at_ms <= ?",
-      now - WAKE_RETENTION_MS,
+      "DELETE FROM debounce_bursts WHERE leading_cursor IN (SELECT cursor FROM wake_events " +
+        "WHERE received_at_ms <= ?) OR pending_cursor IN (SELECT cursor FROM wake_events " +
+        "WHERE received_at_ms <= ?)",
+      cutoff,
+      cutoff,
     );
+    this.storage.sql.exec(
+      "DELETE FROM wake_intents WHERE cursor IN (SELECT cursor FROM wake_events WHERE received_at_ms <= ?)",
+      cutoff,
+    );
+    this.storage.sql.exec("DELETE FROM wake_events WHERE received_at_ms <= ?", cutoff);
   }
 
   private findDelivery(deliveryId: string): number | null {
@@ -341,11 +377,12 @@ export class WakeHistory {
     );
   }
 
-  private rowsAfter(after: number): StoredWake[] {
+  private intentRowsAfter(after: number): StoredWake[] {
     return this.storage.sql
       .exec<StoredWake>(
-        "SELECT cursor, received_at_ms, kind, delivery_id, repository_id, pr_number, head_oid " +
-          "FROM wake_events WHERE cursor > ? ORDER BY cursor ASC",
+        "SELECT e.cursor, e.received_at_ms, e.kind, e.delivery_id, e.repository_id, e.pr_number, " +
+          "e.head_oid FROM wake_events e JOIN wake_intents i ON i.cursor = e.cursor " +
+          "WHERE e.cursor > ? ORDER BY e.cursor ASC",
         after,
       )
       .toArray();
@@ -373,7 +410,10 @@ export class WakeHistory {
   private isRetainedCursor(after: number, cursor: number): boolean {
     if (cursor === 0) return after === 0;
     const oldest = this.storage.sql
-      .exec<{ cursor: number }>("SELECT cursor FROM wake_events ORDER BY cursor ASC LIMIT 1")
+      .exec<{ cursor: number }>(
+        "SELECT e.cursor FROM wake_events e JOIN wake_intents i ON i.cursor = e.cursor " +
+          "ORDER BY e.cursor ASC LIMIT 1",
+      )
       .toArray()[0];
     return Boolean(oldest && (after >= oldest.cursor || (after === 0 && oldest.cursor === 1)));
   }

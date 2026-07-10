@@ -61,7 +61,9 @@ describe("durable wake delivery", () => {
         "100",
         "owner/repository",
       );
-      state.storage.sql.exec("UPDATE broker_state SET current_cursor = 1 WHERE id = 1");
+      state.storage.sql.exec(
+        "UPDATE broker_state SET current_cursor = 1, intents_initialized = 0 WHERE id = 1",
+      );
     });
     await evictDurableObject(stub(repository));
     await withHistory(repository, (history, state) => {
@@ -71,6 +73,54 @@ describe("durable wake delivery", () => {
         resync: false,
       });
       expect(tableColumns(state, "wake_events")).not.toContain("repository_full_name");
+    });
+  });
+
+  it("replays only leading and trailing logical intents from a burst", async () => {
+    await withHistory("logical-replay", async (history) => {
+      await history.accept(wake(1, { changeNumber: 7 }), base);
+      await history.accept(wake(2, { changeNumber: 7 }), base + 1);
+      await history.accept(wake(3, { changeNumber: 7 }), base + 2);
+      expect(history.resume(0, { changeNumber: 7 }, base + DEBOUNCE_WINDOW_MS)).toEqual({
+        cursor: 3,
+        replay: [1, 3],
+        resync: false,
+      });
+    });
+  });
+
+  it("cleans failed outbox, burst, and logical intent state at exact retention", async () => {
+    await withHistory("expiry-cleanup", async (history, state) => {
+      await history.accept(wake(1, { changeNumber: 7 }), base);
+      await history.deliver(base, () => {
+        throw new Error("persistent failure");
+      });
+      await history.deliver(base + WAKE_RETENTION_MS + 1, () => undefined);
+      for (const table of ["wake_events", "wake_outbox", "wake_intents", "debounce_bursts"]) {
+        expect(state.storage.sql.exec(`SELECT * FROM ${table}`).toArray()).toEqual([]);
+      }
+    });
+  });
+
+  it("schedules retention cleanup when an upgraded object activates with SQL history", async () => {
+    const repository = "idle-upgrade";
+    const receivedAt = base + 9;
+    await withHistory(repository, (_, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO wake_events (cursor, received_at_ms, kind, head_oid, delivery_id, repository_id) " +
+          "VALUES (?, ?, ?, ?, ?, ?)",
+        1,
+        receivedAt,
+        "status",
+        "head",
+        "upgrade-delivery",
+        "100",
+      );
+      state.storage.sql.exec("UPDATE broker_state SET current_cursor = 1 WHERE id = 1");
+    });
+    await evictDurableObject(stub(repository));
+    await withHistory(repository, async (_, state) => {
+      expect(await state.storage.getAlarm()).toBe(receivedAt + WAKE_RETENTION_MS);
     });
   });
 
