@@ -78,8 +78,9 @@ export class RepositoryGateway extends DurableObject<Env> {
   private publish(headOid: string): void {
     const cursor = this.history.append(headOid, Date.now());
     for (const socket of this.ctx.getWebSockets()) {
-      const attachment = socket.deserializeAttachment() as SocketAttachment | null;
-      if (attachment?.headOid === headOid) socket.send(frame("wake", cursor));
+      if (attachmentHeadOid(socket.deserializeAttachment()) === headOid) {
+        socket.send(frame("wake", cursor));
+      }
     }
   }
 }
@@ -119,6 +120,22 @@ function connectWatcher(
   headers.set("X-Gateway-Repository", repository);
   const forwarded = new Request(request, { headers });
   return env.REPOSITORY_GATEWAY.get(env.REPOSITORY_GATEWAY.idFromName(repository)).fetch(forwarded);
+}
+
+function attachmentHeadOid(attachment: unknown): string | null {
+  if (typeof attachment === "string") return attachment;
+  if (!attachment || typeof attachment !== "object") return null;
+  const value = attachment as Partial<SocketAttachment>;
+  const cursor = value.cursor;
+  if (
+    typeof value.headOid !== "string" ||
+    typeof cursor !== "number" ||
+    !Number.isSafeInteger(cursor) ||
+    cursor < 0
+  ) {
+    return null;
+  }
+  return value.headOid;
 }
 
 function unavailable(): Response {

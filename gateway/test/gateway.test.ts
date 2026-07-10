@@ -183,6 +183,25 @@ describe("GitHub status gateway", () => {
     socket.close();
   });
 
+  it("wakes a hibernated watcher with a legacy head-OID attachment", async () => {
+    const repository = "legacy-attachment/repo";
+    const socket = await watcher(repository);
+    const ready = nextMessage(socket);
+    register(socket, repository, "legacy-head", null);
+    expect(await ready).toMatchObject({ type: "ready", cursor: 0 });
+
+    const stub = env.REPOSITORY_GATEWAY.get(env.REPOSITORY_GATEWAY.idFromName(repository));
+    await runInDurableObject(stub, (_, state) => {
+      state.getWebSockets()[0].serializeAttachment("legacy-head");
+    });
+    await evictDurableObject(stub);
+
+    const wake = nextMessage(socket);
+    expect((await exports.default.fetch(signedStatus(repository, "legacy-head"))).status).toBe(202);
+    expect(await wake).toMatchObject({ type: "wake", cursor: 1 });
+    socket.close();
+  });
+
   it("resyncs an expired or unknown cursor after ready", async () => {
     const repository = "resync/repo";
     const stub = env.REPOSITORY_GATEWAY.get(env.REPOSITORY_GATEWAY.idFromName(repository));
