@@ -102,7 +102,8 @@ from its authoritative snapshot. GitLab event mode is unavailable. An event is o
 babysit performs an authoritative GitHub fetch after gateway ready,
 wake, replay, resync, and fallback ticks. Without an explicit `--interval`, event mode uses a
 300-second fallback poll; an explicit interval wins. This client does not provision a gateway,
-webhook, Worker, or token server-side.
+webhook, Worker, or token server-side. For the manual Cloudflare deployment, webhook, Keychain,
+rotation, and troubleshooting procedure, see the [gateway operations runbook](openwiki/operations/gateway.md).
 
 ## Exit codes
 

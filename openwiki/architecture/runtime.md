@@ -32,7 +32,8 @@
   deadline; non-retryable errors stop the command. The loop sleeps for the configured interval,
   capped by remaining timeout.
 - `wait --events --gateway-url <wss-url>` retains that same loop but uses an event wake source.
-  Event mode is GitHub-only and falls back every 300 seconds unless `--interval` is explicit.
+  Event mode is GitHub-only and falls back every 300 seconds unless `--interval` is explicit. The
+  manual deployment and operational boundary is documented in [Gateway operations](../operations/gateway.md).
 
 ## Event wake invariant
 
