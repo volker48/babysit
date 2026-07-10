@@ -316,6 +316,7 @@ impl WakeSource for EventWakeSource {
                 self.wait_for_socket(deadline)?
             };
             if woke {
+                self.pending_refetch = false;
                 return Ok(());
             }
         }
@@ -432,9 +433,11 @@ impl GatewaySocketFactory for TungsteniteFactory {
             .checked_add(timeout)
             .ok_or(GatewayError::Retryable)?;
         let request = gateway_request(config, token)?;
-        let address = resolve_address(config.url.clone(), remaining_timeout(deadline)?)?;
-        let stream = TcpStream::connect_timeout(&address, remaining_timeout(deadline)?)
-            .map_err(|_| GatewayError::Retryable)?;
+        let addresses = resolve_addresses(config.url.clone(), remaining_timeout(deadline)?)?;
+        let stream =
+            connect_resolved_addresses(addresses, deadline, Instant::now, |address, timeout| {
+                TcpStream::connect_timeout(&address, timeout).map_err(|_| GatewayError::Retryable)
+            })?;
         stream
             .set_read_timeout(Some(remaining_timeout(deadline)?))
             .map_err(|_| GatewayError::Retryable)?;
@@ -525,7 +528,7 @@ fn remaining_timeout_at(deadline: Instant, now: Instant) -> Result<Duration, Gat
     Ok(remaining)
 }
 
-fn resolve_address(url: Url, timeout: Duration) -> Result<SocketAddr, GatewayError> {
+fn resolve_addresses(url: Url, timeout: Duration) -> Result<Vec<SocketAddr>, GatewayError> {
     let (sender, receiver) = mpsc::sync_channel(1);
     thread::spawn(move || {
         let result = url
@@ -535,10 +538,35 @@ fn resolve_address(url: Url, timeout: Duration) -> Result<SocketAddr, GatewayErr
     });
     receiver
         .recv_timeout(timeout)
-        .map_err(|_| GatewayError::Retryable)??
-        .into_iter()
-        .next()
-        .ok_or(GatewayError::Retryable)
+        .map_err(|_| GatewayError::Retryable)?
+        .and_then(|addresses| {
+            if addresses.is_empty() {
+                Err(GatewayError::Retryable)
+            } else {
+                Ok(addresses)
+            }
+        })
+}
+
+fn connect_resolved_addresses<T, N, C>(
+    addresses: impl IntoIterator<Item = SocketAddr>,
+    deadline: Instant,
+    mut now: N,
+    mut connect: C,
+) -> Result<T, GatewayError>
+where
+    N: FnMut() -> Instant,
+    C: FnMut(SocketAddr, Duration) -> Result<T, GatewayError>,
+{
+    for address in addresses {
+        let timeout = remaining_timeout_at(deadline, now())?;
+        match connect(address, timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(GatewayError::Retryable) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(GatewayError::Retryable)
 }
 
 fn gateway_request(
@@ -678,6 +706,84 @@ mod tests {
             ]
         );
         assert_eq!(*flush_timeouts.borrow(), [Duration::from_secs(4)]);
+    }
+
+    #[test]
+    fn connects_to_a_later_address_when_earlier_is_retryable() {
+        let first = "127.0.0.1:443".parse().unwrap();
+        let second = "127.0.0.2:443".parse().unwrap();
+        let start = Instant::now();
+        let now = Cell::new(start);
+        let calls = RefCell::new(Vec::new());
+        let timeouts = RefCell::new(Vec::new());
+
+        let result = connect_resolved_addresses(
+            [first, second],
+            start + Duration::from_secs(10),
+            || now.get(),
+            |address, timeout| {
+                calls.borrow_mut().push(address);
+                timeouts.borrow_mut().push(timeout);
+                if address == first {
+                    now.set(start + Duration::from_secs(2));
+                    Err(GatewayError::Retryable)
+                } else {
+                    Ok("connected")
+                }
+            },
+        );
+
+        assert_eq!(result, Ok("connected"));
+        assert_eq!(*calls.borrow(), [first, second]);
+        assert_eq!(
+            *timeouts.borrow(),
+            [Duration::from_secs(10), Duration::from_secs(8)]
+        );
+    }
+
+    #[test]
+    fn returns_retryable_after_all_addresses_fail() {
+        let first = "127.0.0.1:443".parse().unwrap();
+        let second = "127.0.0.2:443".parse().unwrap();
+        let start = Instant::now();
+        let calls = RefCell::new(Vec::new());
+
+        let result: Result<(), GatewayError> = connect_resolved_addresses(
+            [first, second],
+            start + Duration::from_secs(10),
+            || start,
+            |address, _| {
+                calls.borrow_mut().push(address);
+                Err(GatewayError::Retryable)
+            },
+        );
+
+        assert_eq!(result, Err(GatewayError::Retryable));
+        assert_eq!(*calls.borrow(), [first, second]);
+    }
+
+    #[test]
+    fn deadline_exhaustion_stops_address_attempts() {
+        let first = "127.0.0.1:443".parse().unwrap();
+        let second = "127.0.0.2:443".parse().unwrap();
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(10);
+        let now = Cell::new(start);
+        let calls = RefCell::new(Vec::new());
+
+        let result: Result<(), GatewayError> = connect_resolved_addresses(
+            [first, second],
+            deadline,
+            || now.get(),
+            |address, _| {
+                calls.borrow_mut().push(address);
+                now.set(deadline);
+                Err(GatewayError::Retryable)
+            },
+        );
+
+        assert_eq!(result, Err(GatewayError::Retryable));
+        assert_eq!(*calls.borrow(), [first]);
     }
 
     #[test]

@@ -339,6 +339,53 @@ fn initial_ready_timeout_degrades_to_retryable_fallback() {
 }
 
 #[test]
+fn a_wake_causes_only_one_immediate_authoritative_refetch() {
+    let runtime = Rc::new(FakeRuntime::new());
+    let start = *runtime.now.borrow();
+    let received = Rc::new(RefCell::new(VecDeque::from([
+        r#"{"type":"ready","version":1,"cursor":45}"#.to_string(),
+        r#"{"type":"wake","version":1,"cursor":46}"#.to_string(),
+    ])));
+    let mut source = EventWakeSource::with_runtime(
+        GatewayConfig::parse("wss://gateway.example/watch").unwrap(),
+        Box::new(MemoryStore(
+            SecretToken::new("test-token".to_string()).unwrap(),
+        )),
+        Box::new(ScriptedFactory {
+            received,
+            sent: Rc::new(RefCell::new(Vec::new())),
+        }),
+        Box::new(SharedRuntime(runtime.clone())),
+    )
+    .unwrap();
+    let mut fetch_times = Vec::new();
+    let mut snapshots = vec![
+        snapshot("OPEN"),
+        snapshot("OPEN"),
+        snapshot("OPEN"),
+        snapshot("CLOSED"),
+    ]
+    .into_iter();
+    let outcome = wait_until_settled(
+        &mut |_| {
+            fetch_times.push(*runtime.now.borrow());
+            Ok(snapshots.next().unwrap())
+        },
+        &mut source,
+        Duration::from_secs(60),
+        Duration::from_secs(30),
+        &SettleOptions::default(),
+    )
+    .unwrap();
+
+    assert!(matches!(outcome, WaitOutcome::Settled { .. }));
+    assert_eq!(
+        fetch_times,
+        [start, start, start, start + Duration::from_secs(30),]
+    );
+}
+
+#[test]
 fn replay_at_ready_cursor_is_ignored_until_a_newer_wake_arrives() {
     let received = Rc::new(RefCell::new(VecDeque::from([
         r#"{"type":"ready","version":1,"cursor":45}"#.to_string(),
