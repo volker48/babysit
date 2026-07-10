@@ -32,6 +32,11 @@ Important options:
 - `--nitpicks` includes CodeRabbit nitpick review-body findings.
 - `--no-reviews` allows settling without a matching bot review.
 - `--timeout <secs>` and `--interval <secs>` are valid only with `wait`.
+- `--events --gateway-url <wss-url>` opts GitHub waits into gateway wake signals. Polling is the
+  default; event mode requires the non-secret `wss://` URL and uses a 300-second fallback unless
+  `--interval` is explicit. GitLab events are rejected.
+- `gateway-token enroll|status|delete|rotate` manages the gateway bearer token in the macOS
+  Keychain; status never prints it.
 
 Default bots are defined in `/src/bots.rs`: `coderabbitai`, `chatgpt-codex-connector`, and `cursor`.
 
@@ -87,3 +92,5 @@ Note: during this OpenWiki initialization, `cargo` was not available in the exec
 - GitHub data fetching: start in `/src/github.rs`; check GraphQL pagination and `gh pr view` JSON fields.
 - GitLab data fetching: start in `/src/gitlab.rs`; check MR, pipeline jobs, discussions, commit timestamp, and host/project parsing.
 - Shared external-command behavior: start in `/src/forge.rs`; preserve timeout, pagination, and retryability semantics.
+- Event wake behavior: start in `/src/event.rs` and `/src/wait.rs`; preserve authoritative
+  snapshot-only settlement and ready/cursor ordering.

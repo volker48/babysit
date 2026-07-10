@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MAX_WAIT_SECONDS: u64 = 30 * 24 * 60 * 60;
 
@@ -7,18 +7,29 @@ use crate::core::{
     Finding, PrSnapshot, SettleOptions, SettleResult, evaluate_settled, exit_code_for,
     render_findings, render_status, unresolved_findings,
 };
+use crate::credentials::{production_store, read_token};
+use crate::event::EventWakeSource;
 use crate::forge::{
     CliError, ForgeName, ForgeProvider, SnapshotFetchOptions, UsageError, auto_detect_forge,
 };
 use crate::github::create_github_provider;
 use crate::gitlab::create_gitlab_provider;
-use crate::wait::{PollingWakeSource, WaitOutcome, wait_until_settled};
+use crate::wait::{PollingWakeSource, WaitOutcome, WakeSource, wait_until_settled};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandName {
     Status,
     Findings,
     Wait,
+    GatewayToken,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayTokenAction {
+    Enroll,
+    Status,
+    Delete,
+    Rotate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,11 +44,15 @@ pub struct CliOptions {
     pub no_reviews: bool,
     pub timeout_secs: u64,
     pub interval_secs: u64,
+    pub events: bool,
+    pub gateway_url: Option<String>,
+    pub gateway_token_action: Option<GatewayTokenAction>,
 }
 
 struct ParseState {
     opts: CliOptions,
     wait_flag_used: bool,
+    interval_explicit: bool,
 }
 
 enum ValueFlag {
@@ -46,23 +61,24 @@ enum ValueFlag {
     TimeoutSecs,
     IntervalSecs,
     Forge,
+    GatewayUrl,
 }
 
 pub fn parse_args(argv: &[String]) -> Result<CliOptions, UsageError> {
     let command = parse_command(argv.first().map(String::as_str))?;
+    if command == CommandName::GatewayToken {
+        return parse_gateway_token_args(argv);
+    }
     let mut state = ParseState {
         opts: default_options(command),
         wait_flag_used: false,
+        interval_explicit: false,
     };
     let mut index = 1;
     while index < argv.len() {
         index = consume_token(argv, index, &mut state)?;
     }
-    if state.wait_flag_used && state.opts.command != CommandName::Wait {
-        return Err(UsageError::new(
-            "--timeout and --interval are only valid with wait",
-        ));
-    }
+    validate_wait_options(&mut state)?;
     Ok(state.opts)
 }
 
@@ -71,6 +87,7 @@ fn parse_command(value: Option<&str>) -> Result<CommandName, UsageError> {
         Some("status") => Ok(CommandName::Status),
         Some("findings") => Ok(CommandName::Findings),
         Some("wait") => Ok(CommandName::Wait),
+        Some("gateway-token") => Ok(CommandName::GatewayToken),
         Some(value) => Err(UsageError::new(format!("unknown subcommand: {value}"))),
         None => Err(UsageError::new("missing subcommand")),
     }
@@ -88,6 +105,9 @@ fn default_options(command: CommandName) -> CliOptions {
         no_reviews: false,
         timeout_secs: 1800,
         interval_secs: 30,
+        events: false,
+        gateway_url: None,
+        gateway_token_action: None,
     }
 }
 
@@ -122,6 +142,10 @@ fn assign_bool_flag(arg: &str, state: &mut ParseState) -> bool {
         "--all" => state.opts.all = true,
         "--nitpicks" => state.opts.nitpicks = true,
         "--no-reviews" => state.opts.no_reviews = true,
+        "--events" => {
+            state.opts.events = true;
+            state.wait_flag_used = true;
+        }
         _ => return false,
     }
     true
@@ -142,6 +166,7 @@ fn value_flag(flag: &str) -> Option<ValueFlag> {
         "--forge" => Some(ValueFlag::Forge),
         "--timeout" => Some(ValueFlag::TimeoutSecs),
         "--interval" => Some(ValueFlag::IntervalSecs),
+        "--gateway-url" => Some(ValueFlag::GatewayUrl),
         _ => None,
     }
 }
@@ -175,8 +200,49 @@ fn assign_value(state: &mut ParseState, flag: ValueFlag, value: &str) -> Result<
             state.opts.timeout_secs = parse_seconds(state, value, "--timeout")?
         }
         ValueFlag::IntervalSecs => {
-            state.opts.interval_secs = parse_seconds(state, value, "--interval")?
+            state.opts.interval_secs = parse_seconds(state, value, "--interval")?;
+            state.interval_explicit = true;
         }
+        ValueFlag::GatewayUrl => {
+            state.opts.gateway_url = Some(non_empty(value, "--gateway-url")?);
+            state.wait_flag_used = true;
+        }
+    }
+    Ok(())
+}
+
+fn parse_gateway_token_args(argv: &[String]) -> Result<CliOptions, UsageError> {
+    if argv.len() != 2 {
+        return Err(UsageError::new(
+            "gateway-token requires exactly one action: enroll, status, delete, or rotate",
+        ));
+    }
+    let action = match argv[1].as_str() {
+        "enroll" => GatewayTokenAction::Enroll,
+        "status" => GatewayTokenAction::Status,
+        "delete" => GatewayTokenAction::Delete,
+        "rotate" => GatewayTokenAction::Rotate,
+        _ => return Err(UsageError::new("unknown gateway-token action")),
+    };
+    let mut options = default_options(CommandName::GatewayToken);
+    options.gateway_token_action = Some(action);
+    Ok(options)
+}
+
+fn validate_wait_options(state: &mut ParseState) -> Result<(), UsageError> {
+    if state.wait_flag_used && state.opts.command != CommandName::Wait {
+        return Err(UsageError::new(
+            "--timeout, --interval, --events, and --gateway-url are only valid with wait",
+        ));
+    }
+    if state.opts.gateway_url.is_some() && !state.opts.events {
+        return Err(UsageError::new("--gateway-url requires --events"));
+    }
+    if state.opts.events && state.opts.gateway_url.is_none() {
+        return Err(UsageError::new("--events requires --gateway-url <wss-url>"));
+    }
+    if state.opts.events && !state.interval_explicit {
+        state.opts.interval_secs = 300;
     }
     Ok(())
 }
@@ -249,6 +315,45 @@ fn run_inner(argv: &[String]) -> Result<i32, RunError> {
         CommandName::Status => run_status(&opts).map_err(RunError::Cli),
         CommandName::Findings => run_findings(&opts).map_err(RunError::Cli),
         CommandName::Wait => run_wait(&opts).map_err(RunError::Cli),
+        CommandName::GatewayToken => run_gateway_token(&opts).map_err(RunError::Cli),
+    }
+}
+
+fn run_gateway_token(opts: &CliOptions) -> Result<i32, CliError> {
+    let store = production_store();
+    let action = opts
+        .gateway_token_action
+        .expect("gateway token action was parsed");
+    println!(
+        "{}",
+        gateway_token_action(action, store.as_ref(), read_token)?
+    );
+    Ok(0)
+}
+
+/// Performs a token action through injected storage and input boundaries.
+pub fn gateway_token_action<F>(
+    action: GatewayTokenAction,
+    store: &dyn crate::credentials::TokenStore,
+    input: F,
+) -> Result<&'static str, CliError>
+where
+    F: FnOnce() -> Result<crate::credentials::SecretToken, CliError>,
+{
+    match action {
+        GatewayTokenAction::Status => Ok(if store.load()?.is_some() {
+            "gateway token: configured"
+        } else {
+            "gateway token: not configured"
+        }),
+        GatewayTokenAction::Delete => {
+            store.delete()?;
+            Ok("gateway token deleted")
+        }
+        GatewayTokenAction::Enroll | GatewayTokenAction::Rotate => {
+            store.save(&input()?)?;
+            Ok("gateway token saved")
+        }
     }
 }
 
@@ -269,11 +374,25 @@ fn run_findings(opts: &CliOptions) -> Result<i32, CliError> {
 }
 
 fn run_wait(opts: &CliOptions) -> Result<i32, CliError> {
-    let mut wake_source = PollingWakeSource;
-    let mut fetcher = || fetch_snapshot(opts);
+    let forge = resolve_forge(opts);
+    if opts.events && forge == ForgeName::GitLab {
+        return Err(CliError::new(
+            "--events is supported only for GitHub",
+            false,
+        ));
+    }
+    let mut wake_source: Box<dyn WakeSource> = if opts.events {
+        Box::new(EventWakeSource::new(
+            opts.gateway_url.as_deref().expect("gateway URL was parsed"),
+        )?)
+    } else {
+        Box::new(PollingWakeSource)
+    };
+    let mut fetcher =
+        |remaining| fetch_snapshot_for(opts, forge, Instant::now().checked_add(remaining));
     let outcome = wait_until_settled(
         &mut fetcher,
-        &mut wake_source,
+        &mut *wake_source,
         Duration::from_secs(opts.timeout_secs),
         Duration::from_secs(opts.interval_secs),
         &settle_options(opts),
@@ -282,6 +401,10 @@ fn run_wait(opts: &CliOptions) -> Result<i32, CliError> {
         WaitOutcome::Settled { snapshot, settle } => finish_wait(&snapshot, &settle, opts),
         WaitOutcome::TimedOut { snapshot, settle } => {
             println!("{}", wait_output(&snapshot, &settle, opts, Some("TIMEOUT")));
+            Ok(3)
+        }
+        WaitOutcome::TimedOutWithoutSnapshot => {
+            println!("TIMEOUT: no authoritative snapshot was fetched");
             Ok(3)
         }
     }
@@ -326,13 +449,26 @@ fn settle_options(opts: &CliOptions) -> SettleOptions {
 }
 
 fn fetch_snapshot(opts: &CliOptions) -> Result<PrSnapshot, CliError> {
+    fetch_snapshot_for(opts, resolve_forge(opts), None)
+}
+
+fn resolve_forge(opts: &CliOptions) -> ForgeName {
+    opts.forge.unwrap_or_else(auto_detect_forge)
+}
+
+fn fetch_snapshot_for(
+    opts: &CliOptions,
+    forge: ForgeName,
+    deadline: Option<Instant>,
+) -> Result<PrSnapshot, CliError> {
     let fetch_opts = SnapshotFetchOptions {
         pr: opts.pr.clone(),
         repo: opts.repo.clone(),
         bots: opts.bots.clone(),
         nitpicks: opts.nitpicks,
+        deadline,
     };
-    match opts.forge.unwrap_or_else(auto_detect_forge) {
+    match forge {
         ForgeName::GitLab => create_gitlab_provider().fetch_snapshot(&fetch_opts),
         ForgeName::GitHub => create_github_provider().fetch_snapshot(&fetch_opts),
     }
@@ -341,6 +477,7 @@ fn fetch_snapshot(opts: &CliOptions) -> Result<PrSnapshot, CliError> {
 pub fn usage() -> String {
     [
         "Usage: babysit status|findings|wait [<pr>] [options]",
+        "       babysit gateway-token <enroll|status|delete|rotate>",
         "Options:",
         "  -R, --repo <owner/repo>",
         "  --forge <github|gitlab>  default: auto (origin host containing gitlab => gitlab)",
@@ -349,7 +486,9 @@ pub fn usage() -> String {
         "  --nitpicks",
         "  --no-reviews",
         "  --timeout <secs>        wait only (default 1800)",
-        "  --interval <secs>       wait only (default 30)",
+        "  --interval <secs>       wait only (default 30; event fallback default 300)",
+        "  --events                 wait only; requires --gateway-url",
+        "  --gateway-url <wss-url>  event mode only",
     ]
     .join("\n")
 }

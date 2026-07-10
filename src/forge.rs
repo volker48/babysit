@@ -29,6 +29,7 @@ pub struct SnapshotFetchOptions {
     pub repo: Option<String>,
     pub bots: Vec<String>,
     pub nitpicks: bool,
+    pub deadline: Option<Instant>,
 }
 
 pub trait ForgeProvider {
@@ -103,7 +104,16 @@ const CLI_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_JSON_PAGES: usize = 100;
 
 pub fn run_json(command: &str, args: &[String], context: &str) -> Result<Value, CliError> {
-    let output = command_output(command, args, context)?;
+    run_json_deadline(command, args, context, None)
+}
+
+pub fn run_json_deadline(
+    command: &str,
+    args: &[String],
+    context: &str,
+    deadline: Option<Instant>,
+) -> Result<Value, CliError> {
+    let output = command_output(command, args, context, deadline)?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     if let Some(signal) = signal_text(&output) {
         return Err(cli_error(
@@ -126,7 +136,16 @@ pub fn run_json(command: &str, args: &[String], context: &str) -> Result<Value, 
     })
 }
 
-fn command_output(command: &str, args: &[String], context: &str) -> Result<Output, CliError> {
+fn command_output(
+    command: &str,
+    args: &[String],
+    context: &str,
+    deadline: Option<Instant>,
+) -> Result<Output, CliError> {
+    let deadline = command_deadline(Instant::now(), deadline)?;
+    if Instant::now() >= deadline {
+        return Err(timeout_error(context));
+    }
     let mut child = Command::new(command)
         .args(args)
         .stdout(Stdio::piped())
@@ -143,8 +162,14 @@ fn command_output(command: &str, args: &[String], context: &str) -> Result<Outpu
         .ok_or_else(|| cli_error(context, "", Some("missing stderr pipe".to_string()), false))?;
     let stdout_reader = read_stream(stdout);
     let stderr_reader = read_stream(stderr);
-    let deadline = Instant::now() + CLI_TIMEOUT;
     loop {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = join_stream(stdout_reader, context);
+            let _ = join_stream(stderr_reader, context);
+            return Err(timeout_error(context));
+        }
         let status = child
             .try_wait()
             .map_err(|error| cli_error(context, "", Some(error.to_string()), false))?;
@@ -157,20 +182,19 @@ fn command_output(command: &str, args: &[String], context: &str) -> Result<Outpu
                 stderr,
             });
         }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = join_stream(stdout_reader, context);
-            let stderr = join_stream(stderr_reader, context).unwrap_or_default();
-            return Err(cli_error(
-                context,
-                &String::from_utf8_lossy(&stderr),
-                Some("operation timed out".to_string()),
-                true,
-            ));
-        }
         sleep(Duration::from_millis(50));
     }
+}
+
+fn command_deadline(now: Instant, overall: Option<Instant>) -> Result<Instant, CliError> {
+    let command = now
+        .checked_add(CLI_TIMEOUT)
+        .ok_or_else(|| CliError::new("command deadline is too large", false))?;
+    Ok(overall.map_or(command, |deadline| deadline.min(command)))
+}
+
+fn timeout_error(context: &str) -> CliError {
+    cli_error(context, "", Some("operation timed out".to_string()), true)
 }
 
 fn read_stream<R>(mut stream: R) -> JoinHandle<io::Result<Vec<u8>>>
@@ -300,4 +324,20 @@ fn remote_host(remote_url: &str) -> String {
         .next()
         .unwrap_or(remote_url)
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_overall_deadline_still_caps_a_subprocess_at_cli_timeout() {
+        let now = Instant::now();
+        let overall = now.checked_add(Duration::from_secs(3600)).unwrap();
+
+        assert_eq!(
+            command_deadline(now, Some(overall)).unwrap(),
+            now.checked_add(CLI_TIMEOUT).unwrap()
+        );
+    }
 }
