@@ -4,6 +4,7 @@ import { access, chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { smokeChildEnvironment } from "./smoke-env.js";
 
 const quietWindowMs = 500;
 const timeoutSecs = 20;
@@ -65,7 +66,10 @@ function defaultBabysitBin(): string {
 }
 
 function findGh(): string {
-  const result = spawnSync("which", ["gh"], { encoding: "utf8" });
+  const result = spawnSync("which", ["gh"], {
+    encoding: "utf8",
+    env: smokeChildEnvironment(process.env),
+  });
   if (result.status !== 0) throw new Error("an authenticated gh executable is required");
   return result.stdout.trim();
 }
@@ -73,6 +77,7 @@ function findGh(): string {
 function fetchHeadOid(gh: string, pr: string, repository: string): string {
   const result = spawnSync(gh, ["pr", "view", pr, "--repo", repository, "--json", "headRefOid"], {
     encoding: "utf8",
+    env: smokeChildEnvironment(process.env),
   });
   if (result.status !== 0) throw new Error("could not fetch the PR head with gh");
   const headOid = JSON.parse(result.stdout).headRefOid;
@@ -81,7 +86,10 @@ function fetchHeadOid(gh: string, pr: string, repository: string): string {
 }
 
 function fetchRepositoryId(gh: string, repository: string): number {
-  const result = spawnSync(gh, ["api", `repos/${repository}`], { encoding: "utf8" });
+  const result = spawnSync(gh, ["api", `repos/${repository}`], {
+    encoding: "utf8",
+    env: smokeChildEnvironment(process.env),
+  });
   if (result.status !== 0) throw new Error("could not fetch the repository ID");
   const repositoryId = repositoryIdFromJson(result.stdout);
   if (!repositoryId) throw new Error("could not fetch the repository ID");
@@ -122,7 +130,10 @@ async function startCli(
   const shim = join(tempDir, "gh");
   await writeFile(shim, ghShim());
   await chmod(shim, 0o700);
-  const tokenStatus = spawnSync(binary, ["gateway-token", "status"], { encoding: "utf8" });
+  const tokenStatus = spawnSync(binary, ["gateway-token", "status"], {
+    encoding: "utf8",
+    env: smokeChildEnvironment(process.env),
+  });
   if (tokenStatus.status !== 0 || !tokenStatus.stdout.includes("configured")) {
     throw new Error("enroll the matching watcher token with babysit gateway-token enroll first");
   }
@@ -146,12 +157,11 @@ async function startCli(
       String(timeoutSecs),
     ],
     {
-      env: {
-        ...process.env,
+      env: smokeChildEnvironment(process.env, {
         GH_VIEW_COUNTER: counter,
         PATH: `${tempDir}:${process.env.PATH}`,
         REAL_GH: realGh,
-      },
+      }),
       stdio: "inherit",
     },
   );
