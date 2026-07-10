@@ -84,10 +84,9 @@ function fetchRepositoryId(gh: string, repository: string): number {
   const result = spawnSync(gh, ["repo", "view", repository, "--json", "databaseId"], {
     encoding: "utf8",
   });
+  if (result.status !== 0) throw new Error("could not fetch the repository ID");
   const databaseId = JSON.parse(result.stdout).databaseId;
-  if (result.status !== 0 || typeof databaseId !== "number") {
-    throw new Error("could not fetch the repository ID");
-  }
+  if (typeof databaseId !== "number") throw new Error("could not fetch the repository ID");
   return databaseId;
 }
 
