@@ -1,0 +1,8 @@
+{
+  "repository": { "id": 1003, "full_name": "pull-requests/repo" },
+  "number": 17,
+  "pull_request": {
+    "number": 99,
+    "head": { "sha": "pull-request-head" }
+  }
+}

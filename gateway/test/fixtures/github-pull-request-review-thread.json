@@ -1,0 +1,8 @@
+{
+  "repository": { "id": 1006, "full_name": "review-threads/repo" },
+  "pull_request": {
+    "number": 31,
+    "head": { "sha": "review-thread-head" }
+  },
+  "thread": { "id": "thread-id" }
+}

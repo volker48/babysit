@@ -1,5 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
+import { isSupportedGitHubEvent, normalizeGitHubWebhook } from "./github";
 import { WakeHistory } from "./replay";
+import { matchesWake, selectWakeRoute, type WakeEvent, type WakeRegistration } from "./wake";
 
 interface Env {
   REPOSITORY_GATEWAY: DurableObjectNamespace<RepositoryGateway>;
@@ -7,18 +9,17 @@ interface Env {
   WATCHER_TOKEN: string;
 }
 
-interface Registration {
+interface Registration extends WakeRegistration {
   after: number | null;
-  headOid: string;
   repository: string;
+}
+
+interface SocketAttachment extends WakeRegistration {
+  cursor: number;
 }
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
-interface SocketAttachment {
-  cursor: number;
-  headOid: string;
-}
 
 export async function fetch(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
@@ -44,9 +45,8 @@ export class RepositoryGateway extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get("Upgrade") === "websocket") return this.acceptWatcher(request);
     if (request.method !== "POST") return new Response("not found", { status: 404 });
-    const status = await request.json<{ headOid?: unknown }>();
-    if (typeof status.headOid !== "string") return new Response("bad status", { status: 400 });
-    this.publish(status.headOid);
+    const wake = await request.json<WakeEvent>();
+    this.publish(wake);
     return new Response(null, { status: 202 });
   }
 
@@ -56,9 +56,12 @@ export class RepositoryGateway extends DurableObject<Env> {
     if (!registration || !this.ctx.getTags(socket).includes(registration.repository)) {
       return socket.close(1008, "invalid registration");
     }
-    const resume = this.history.resume(registration.after, registration.headOid, Date.now());
-    const attachment: SocketAttachment = { cursor: resume.cursor, headOid: registration.headOid };
-    socket.serializeAttachment(attachment);
+    const resume = this.history.resume(registration.after, registration, Date.now());
+    socket.serializeAttachment({
+      cursor: resume.cursor,
+      changeNumber: registration.changeNumber,
+      headRevision: registration.headRevision,
+    } satisfies SocketAttachment);
     socket.send(frame("ready", resume.cursor));
     if (resume.resync) {
       socket.send(frame("resync", resume.cursor));
@@ -83,12 +86,15 @@ export class RepositoryGateway extends DurableObject<Env> {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  private publish(headOid: string): void {
-    const cursor = this.history.append(headOid, Date.now());
-    for (const socket of this.ctx.getWebSockets()) {
-      if (attachmentHeadOid(socket.deserializeAttachment()) === headOid) {
-        socket.send(frame("wake", cursor));
-      }
+  private publish(wake: WakeEvent): void {
+    const cursor = this.history.append(wake);
+    const watchers = activeWatchers(this.ctx.getWebSockets());
+    const route = selectWakeRoute(
+      wake,
+      watchers.map(({ registration }) => registration),
+    );
+    for (const { socket, registration } of watchers) {
+      if (matchesWake(wake, registration, route)) socket.send(frame("wake", cursor));
     }
   }
 }
@@ -100,14 +106,19 @@ async function receiveWebhook(request: Request, env: Env): Promise<Response> {
   if (!(await hasValidSignature(body, signature, env.WEBHOOK_SECRET))) {
     return new Response("invalid signature", { status: 401 });
   }
-  if (request.headers.get("X-GitHub-Event") !== "status")
-    return new Response(null, { status: 202 });
-  const status = normalizeStatus(decoder.decode(body));
-  if (!status) return new Response("invalid status payload", { status: 400 });
-  const id = env.REPOSITORY_GATEWAY.idFromName(status.repository);
-  return env.REPOSITORY_GATEWAY.get(id).fetch("https://repository-gateway/status", {
+  const event = request.headers.get("X-GitHub-Event");
+  if (!isSupportedGitHubEvent(event)) return new Response(null, { status: 202 });
+  const wake = normalizeGitHubWebhook(
+    event,
+    decoder.decode(body),
+    request.headers.get("X-GitHub-Delivery"),
+    Date.now(),
+  );
+  if (!wake) return new Response("invalid webhook payload", { status: 400 });
+  const id = env.REPOSITORY_GATEWAY.idFromName(wake.repository.fullName);
+  return env.REPOSITORY_GATEWAY.get(id).fetch("https://repository-gateway/wake", {
     method: "POST",
-    body: JSON.stringify(status),
+    body: JSON.stringify(wake),
   });
 }
 
@@ -130,22 +141,6 @@ function connectWatcher(
   return env.REPOSITORY_GATEWAY.get(env.REPOSITORY_GATEWAY.idFromName(repository)).fetch(forwarded);
 }
 
-function attachmentHeadOid(attachment: unknown): string | null {
-  if (typeof attachment === "string") return attachment;
-  if (!attachment || typeof attachment !== "object") return null;
-  const value = attachment as Partial<SocketAttachment>;
-  const cursor = value.cursor;
-  if (
-    typeof value.headOid !== "string" ||
-    typeof cursor !== "number" ||
-    !Number.isSafeInteger(cursor) ||
-    cursor < 0
-  ) {
-    return null;
-  }
-  return value.headOid;
-}
-
 function unavailable(): Response {
   return new Response("gateway unavailable", { status: 503 });
 }
@@ -154,16 +149,28 @@ function isConfiguredSecret(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
-function normalizeStatus(body: string): { repository: string; headOid: string } | null {
-  try {
-    const value = JSON.parse(body) as { repository?: { full_name?: unknown }; sha?: unknown };
-    if (typeof value.repository?.full_name !== "string" || typeof value.sha !== "string") {
-      return null;
-    }
-    return { repository: value.repository.full_name, headOid: value.sha };
-  } catch {
-    return null;
+function activeWatchers(
+  sockets: WebSocket[],
+): { socket: WebSocket; registration: WakeRegistration }[] {
+  return sockets.flatMap((socket) => {
+    const registration = attachmentRegistration(socket.deserializeAttachment());
+    return registration ? [{ socket, registration }] : [];
+  });
+}
+
+function attachmentRegistration(attachment: unknown): WakeRegistration | null {
+  if (typeof attachment === "string") return { headRevision: attachment };
+  if (!attachment || typeof attachment !== "object") return null;
+  const value = attachment as Partial<SocketAttachment> & { headOid?: unknown };
+  if (typeof value.headRevision === "string") {
+    if (value.cursor !== undefined && !isValidCursor(value.cursor)) return null;
+    return {
+      changeNumber: typeof value.changeNumber === "number" ? value.changeNumber : undefined,
+      headRevision: value.headRevision,
+    };
   }
+  if (!isValidCursor(value.cursor)) return null;
+  return typeof value.headOid === "string" ? { headRevision: value.headOid } : null;
 }
 
 function parseRegistration(message: string): Registration | null {
@@ -179,7 +186,12 @@ function parseRegistration(message: string): Registration | null {
     if (!isValidAfter(after) || !isValidRegistration(value.type, value.version, watch)) {
       return null;
     }
-    return { after, headOid: watch.headOid, repository: watch.repository };
+    return {
+      after,
+      changeNumber: watch.number,
+      headRevision: watch.headOid,
+      repository: watch.repository,
+    };
   } catch {
     return null;
   }
@@ -189,11 +201,15 @@ function isValidAfter(value: unknown): value is number | null {
   return value === null || (typeof value === "number" && Number.isSafeInteger(value) && value >= 0);
 }
 
+function isValidCursor(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
 function isValidRegistration(
   type: unknown,
   version: unknown,
   watch: Record<string, unknown> | undefined,
-): watch is Record<"headOid" | "repository", string> {
+): watch is Record<"headOid" | "repository", string> & Record<"number", number> {
   if (type !== "register" || version !== 1 || !watch) return false;
   return (
     watch.forge === "github" &&

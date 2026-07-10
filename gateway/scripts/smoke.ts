@@ -16,6 +16,7 @@ const webhookSecret = requiredEnv("WEBHOOK_SECRET");
 const babysitBin = process.env.BABYSIT_BIN ?? defaultBabysitBin();
 const realGh = findGh();
 const headOid = fetchHeadOid(realGh, pr, repository);
+const repositoryId = fetchRepositoryId(realGh, repository);
 const webhookUrl = webhookUrlFor(gatewayUrl);
 const tempDir = await mkdtemp(join(tmpdir(), "babysit-smoke-"));
 const counter = join(tempDir, "gh-pr-view-count");
@@ -24,7 +25,7 @@ try {
   child = await startCli(babysitBin, pr, repository, gatewayUrl, realGh, counter, tempDir);
   await waitForExactFetches(counter, 2, child);
   await waitForQuietCount(counter, 2, child);
-  await sendWebhook(webhookUrl, repository, headOid, webhookSecret);
+  await sendWebhook(webhookUrl, repository, repositoryId, headOid, webhookSecret);
   await waitForExactFetches(counter, 3, child);
   console.log("verified CLI initial, ready, and wake authoritative gh pr view fetches");
 } finally {
@@ -77,6 +78,25 @@ function fetchHeadOid(gh: string, pr: string, repository: string): string {
   const headOid = JSON.parse(result.stdout).headRefOid;
   if (typeof headOid !== "string") throw new Error("gh did not return a PR head OID");
   return headOid;
+}
+
+function fetchRepositoryId(gh: string, repository: string): number {
+  const result = spawnSync(gh, ["api", `repos/${repository}`], { encoding: "utf8" });
+  if (result.status !== 0) throw new Error("could not fetch the repository ID");
+  const repositoryId = repositoryIdFromJson(result.stdout);
+  if (!repositoryId) throw new Error("could not fetch the repository ID");
+  return repositoryId;
+}
+
+function repositoryIdFromJson(output: string): number | null {
+  try {
+    const value: unknown = JSON.parse(output);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+    const id = (value as { id?: unknown }).id;
+    return typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? id : null;
+  } catch {
+    return null;
+  }
 }
 
 function webhookUrlFor(gateway: string): string {
@@ -149,15 +169,20 @@ function ghShim(): string {
 async function sendWebhook(
   webhookUrl: string,
   repository: string,
+  repositoryId: number,
   headOid: string,
   secret: string,
 ): Promise<void> {
-  const body = JSON.stringify({ repository: { full_name: repository }, sha: headOid });
+  const body = JSON.stringify({
+    repository: { id: repositoryId, full_name: repository },
+    sha: headOid,
+  });
   const signature = createHmac("sha256", secret).update(body).digest("hex");
   const response = await fetch(webhookUrl, {
     method: "POST",
     headers: {
       "content-type": "application/json",
+      "x-github-delivery": "gateway-smoke-status",
       "x-github-event": "status",
       "x-hub-signature-256": `sha256=${signature}`,
     },
