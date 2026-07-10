@@ -18,7 +18,7 @@ Because `/src/lib.rs` publicly exposes the modules, integration tests can call p
 
 ## Verification commands
 
-Use the same commands documented in `/README.md` and enforced by `/.gitlab-ci.yml`:
+Use the same Rust commands documented in `/README.md` and enforced by `/.gitlab-ci.yml`:
 
 ```bash
 cargo fmt --all --check
@@ -27,16 +27,33 @@ cargo test --locked --all
 cargo build --locked --release
 ```
 
-During this OpenWiki initialization, `cargo` was not installed in the execution environment, so these commands could not be run live.
+The same pipeline also verifies the Cloudflare gateway package:
+
+```bash
+pnpm --filter @babysit/gateway lint
+pnpm --filter @babysit/gateway format:check
+pnpm --filter @babysit/gateway typecheck
+pnpm --filter @babysit/gateway test
+```
+
+Install the committed pnpm workspace lockfile before running the gateway commands. The gateway
+Vitest suites cover signed webhook ingress, authentication, hibernatable WebSocket registration,
+ready/cursor replay and resync, compact retention, deduplication, debounce, and durable outbox
+retries. The deployed smoke is separate from these deterministic checks; see
+[Gateway operations](operations/gateway.md) for its protected-credential prerequisites and the
+historical #8 tracer evidence.
 
 ## CI pipeline
 
 `/.gitlab-ci.yml` uses `rust:1.85.1-bookworm` and defines two stages:
 
-- `verify`: `fmt`, `clippy`, and `test` jobs.
+- `verify`: Rust `fmt`, `clippy`, and `test` jobs plus gateway lint, format, typecheck, and Vitest jobs.
 - `build`: `release` job that runs `cargo build --locked --release` and publishes `target/release/babysit` as a 7-day artifact.
 
-The pipeline caches Cargo registry/git data and `target/`, keyed by `Cargo.lock`. Jobs install `rustfmt` and `clippy` in `before_script`.
+The pipeline caches Cargo registry/git data and `target/`, keyed by `Cargo.lock`. Rust jobs install
+`rustfmt` and `clippy` in `before_script`. Gateway jobs install the frozen pnpm lockfile with
+lifecycle scripts disabled, then run `gateway_lint`, `gateway_format`, `gateway_typecheck`, and
+`gateway_test`.
 
 ## Event and credential boundaries
 
@@ -51,7 +68,8 @@ cargo check --locked --all-targets --target x86_64-apple-darwin
 ```
 
 This Apple target check is not part of the Linux CI pipeline; it requires a macOS host and its
-native toolchain. Live webhook/gateway validation belongs to the gateway work, not this CLI client.
+native toolchain. Live webhook/gateway validation is an operational smoke, not a default test; see
+[Gateway operations](operations/gateway.md).
 
 ## Fixture strategy
 
