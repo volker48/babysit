@@ -51,19 +51,35 @@ pub struct GatewayConfig {
 impl GatewayConfig {
     pub fn parse(value: &str) -> Result<Self, CliError> {
         let url = Url::parse(value)
-            .map_err(|_| CliError::new("--gateway-url must be a valid wss URL", false))?;
+            .map_err(|_| CliError::new("--gateway-url must be wss://host/watch", false))?;
         if url.scheme() != "wss"
             || url.host_str().is_none()
+            || url.path() != "/watch"
             || !url.username().is_empty()
             || url.password().is_some()
             || url.query().is_some()
             || url.fragment().is_some()
         {
             return Err(CliError::new(
-                "--gateway-url must be a plain wss URL",
+                "--gateway-url must be wss://host/watch",
                 false,
             ));
         }
+        Ok(Self { url })
+    }
+
+    fn for_watch(&self, watch: &WatchRegistration) -> Result<Self, CliError> {
+        let (owner, repository) = watch
+            .repository
+            .split_once('/')
+            .ok_or_else(protocol_error)?;
+        let mut url = self.url.clone();
+        let mut segments = url.path_segments_mut().map_err(|_| protocol_error())?;
+        segments.clear();
+        segments.push("watch");
+        segments.push(owner);
+        segments.push(repository);
+        drop(segments);
         Ok(Self { url })
     }
 }
@@ -174,10 +190,11 @@ impl EventWakeSource {
             .checked_add(remaining.min(REGISTRATION_ATTEMPT_CAP))
             .ok_or_else(deadline_error)?;
         let token = self.store.load()?.ok_or_else(missing_token)?;
+        let socket_config = self.config.for_watch(watch)?;
         let timeout = self.remaining(deadline)?;
         let mut socket = self
             .factory
-            .connect(&self.config, token.expose(), timeout)
+            .connect(&socket_config, token.expose(), timeout)
             .map_err(GatewayError::cli_error)?;
         let timeout = self.remaining(deadline)?;
         socket
@@ -431,6 +448,7 @@ impl GatewaySocketFactory for TungsteniteFactory {
         token: &str,
         timeout: Duration,
     ) -> Result<Box<dyn GatewaySocket>, GatewayError> {
+        initialize_tls_provider()?;
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or(GatewayError::Retryable)?;
@@ -607,6 +625,34 @@ where
     Err(GatewayError::Retryable)
 }
 
+// Rustls requires a process-wide provider before any TLS client builder is used.
+fn initialize_tls_provider() -> Result<(), GatewayError> {
+    install_tls_provider_once(
+        || rustls::crypto::CryptoProvider::get_default().is_some(),
+        || rustls::crypto::ring::default_provider().install_default(),
+    )
+}
+
+fn install_tls_provider_once<Installed, Install, Error>(
+    mut is_installed: Installed,
+    install: Install,
+) -> Result<(), GatewayError>
+where
+    Installed: FnMut() -> bool,
+    Install: FnOnce() -> Result<(), Error>,
+{
+    if is_installed() {
+        return Ok(());
+    }
+    match install() {
+        Ok(()) => Ok(()),
+        Err(_) if is_installed() => Ok(()),
+        Err(_) => Err(GatewayError::Fatal(
+            "gateway TLS provider failed to initialize",
+        )),
+    }
+}
+
 fn gateway_request(
     config: &GatewayConfig,
     token: &str,
@@ -707,6 +753,44 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+
+    #[test]
+    fn installs_process_level_tls_provider() {
+        initialize_tls_provider().unwrap();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+    }
+
+    #[test]
+    fn accepts_provider_installed_by_racing_caller() {
+        let installed = Cell::new(false);
+        assert!(
+            install_tls_provider_once(
+                || installed.get(),
+                || {
+                    installed.set(true);
+                    Err(())
+                },
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn builds_repository_socket_path_with_percent_encoded_segments() {
+        let config = GatewayConfig::parse("wss://gateway.example/watch").unwrap();
+        let watch = WatchRegistration {
+            repository: "owner name/repo?#".to_string(),
+            number: 1,
+            head_oid: "head".to_string(),
+        };
+
+        let socket = config.for_watch(&watch).unwrap();
+
+        assert_eq!(
+            socket.url.as_str(),
+            "wss://gateway.example/watch/owner%20name/repo%3F%23"
+        );
+    }
 
     #[test]
     fn limits_resolvers_left_running_after_timeout() {

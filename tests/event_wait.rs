@@ -738,6 +738,8 @@ fn malformed_gateway_frame_is_fatal_before_a_settled_snapshot_can_succeed() {
 fn rejects_malformed_or_non_wss_gateway_urls() {
     for value in [
         "https://gateway.example",
+        "wss://gateway.example",
+        "wss://gateway.example/watch/example/project",
         "wss://gateway.example/path?token=no",
         "wss://user@gateway.example",
         "wss://gateway.example/#fragment",
