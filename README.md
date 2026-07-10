@@ -52,7 +52,7 @@ Options:
 --timeout <secs>         wait only; overall deadline, default 1800
 --interval <secs>        wait only; default 30 (event fallback default 300)
 --events                 wait only; opt in to GitHub event-assisted wakes
---gateway-url <wss-url>  required with --events; non-secret WebSocket endpoint
+--gateway-url <wss-url>  required with --events; exact non-secret wss://host/watch base URL
 ```
 
 Default bots are `coderabbitai`, `chatgpt-codex-connector`, and `cursor`.
@@ -96,8 +96,10 @@ reports only whether it is configured; `delete` removes it. Tokens use Keychain 
 and account `gateway-bearer-token`, are never read from environment variables or files, and macOS
 Keychain support is required for event mode.
 
-The gateway URL is required and must be a plain `wss://` URL. GitLab event mode is unavailable.
-An event is only a wake signal: babysit performs an authoritative GitHub fetch after gateway ready,
+The gateway URL is required and must be exactly the `wss://host/watch` base URL, with no repository,
+query, fragment, or extra path. babysit appends percent-encoded owner and repository path segments
+from its authoritative snapshot. GitLab event mode is unavailable. An event is only a wake signal:
+babysit performs an authoritative GitHub fetch after gateway ready,
 wake, replay, resync, and fallback ticks. Without an explicit `--interval`, event mode uses a
 300-second fallback poll; an explicit interval wins. This client does not provision a gateway,
 webhook, Worker, or token server-side.
