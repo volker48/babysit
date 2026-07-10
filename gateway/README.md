@@ -27,12 +27,13 @@ place them on a command line or commit them:
 export WATCHER_TOKEN="$(your-secret-manager read babysit/watcher-token)"
 export WEBHOOK_SECRET="$(your-secret-manager read babysit/webhook-secret)"
 babysit gateway-token enroll
-pnpm smoke -- --repository OWNER/REPO --pr NUMBER --gateway-url wss://HOST/watch/OWNER/REPO
+cd gateway && pnpm smoke --repository OWNER/REPO --pr NUMBER --gateway-url wss://HOST/watch/OWNER/REPO
 ```
 
 `gateway-token enroll` prompts for the same watcher token without echoing it. `BABYSIT_BIN` can
 override the default `target/debug/babysit` path. The smoke wraps the real authenticated `gh` with a
 temporary counter, starts `babysit wait` with a deliberately nonmatching bot and a 20-second bound,
-and requires three `gh pr view` calls: initial, post-ready, and post-wake. It sends the signed status
-only after the post-ready fetch. It cannot validate a closed PR, a gateway that cannot be reached, or
-a local Keychain/`gh` setup; it reports failure rather than claiming a live run succeeded.
+and requires exactly three `gh pr view` calls: initial, post-ready, and post-wake. It verifies the
+count stays at two during a short quiet window before sending the signed status. It cannot validate a
+closed PR, a gateway that cannot be reached, or a local Keychain/`gh` setup; it reports failure rather
+than claiming a live run succeeded.

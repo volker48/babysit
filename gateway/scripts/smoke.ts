@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const quietWindowMs = 500;
 const timeoutSecs = 20;
 const args = parseArgs(process.argv.slice(2));
 const repository = requiredArg(args, "--repository");
@@ -21,9 +22,10 @@ const counter = join(tempDir, "gh-pr-view-count");
 let child: ReturnType<typeof spawn> | undefined;
 try {
   child = await startCli(babysitBin, pr, repository, gatewayUrl, realGh, counter, tempDir);
-  await waitForFetches(counter, 2, child);
+  await waitForExactFetches(counter, 2, child);
+  await waitForQuietCount(counter, 2, child);
   await sendWebhook(webhookUrl, repository, headOid, webhookSecret);
-  await waitForFetches(counter, 3, child);
+  await waitForExactFetches(counter, 3, child);
   console.log("verified CLI initial, ready, and wake authoritative gh pr view fetches");
 } finally {
   child?.kill("SIGTERM");
@@ -31,10 +33,11 @@ try {
 }
 
 function parseArgs(values: string[]): Map<string, string> {
-  if (values.length % 2 !== 0) throw new Error("every smoke option requires a value");
+  const options = values[0] === "--" ? values.slice(1) : values;
+  if (options.length % 2 !== 0) throw new Error("every smoke option requires a value");
   const args = new Map<string, string>();
-  for (let index = 0; index < values.length; index += 2) {
-    const [name, value] = [values[index], values[index + 1]];
+  for (let index = 0; index < options.length; index += 2) {
+    const [name, value] = [options[index], options[index + 1]];
     if (!name.startsWith("--") || !value) throw new Error("every smoke option requires a value");
     args.set(name, value);
   }
@@ -164,7 +167,7 @@ async function sendWebhook(
   if (!response.ok) throw new Error(`webhook failed: ${response.status}`);
 }
 
-async function waitForFetches(
+async function waitForExactFetches(
   counter: string,
   expected: number,
   child: ReturnType<typeof spawn>,
@@ -173,10 +176,31 @@ async function waitForFetches(
   while (Date.now() < deadline) {
     if (child.exitCode !== null)
       throw new Error(`babysit exited before ${expected} gh pr view fetches`);
-    if ((await fetchCount(counter)) >= expected) return;
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    const count = await fetchCount(counter);
+    if (count === expected) return;
+    if (count > expected) throw new Error(`expected ${expected} gh pr view fetches, got ${count}`);
+    await sleep(100);
   }
   throw new Error(`timed out waiting for ${expected} gh pr view fetches`);
+}
+
+async function waitForQuietCount(
+  counter: string,
+  expected: number,
+  child: ReturnType<typeof spawn>,
+): Promise<void> {
+  const deadline = Date.now() + quietWindowMs;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null) throw new Error("babysit exited during quiet window");
+    const count = await fetchCount(counter);
+    if (count !== expected)
+      throw new Error(`expected ${expected} gh pr view fetches before wake, got ${count}`);
+    await sleep(50);
+  }
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 async function fetchCount(counter: string): Promise<number> {
