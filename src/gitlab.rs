@@ -4,7 +4,8 @@ use serde_json::Value;
 use crate::bots::adapter_for_login;
 use crate::core::{BotReview, CheckState, PrCheck, PrSnapshot, ReviewThread, finding_from_thread};
 use crate::forge::{
-    CliError, ForgeProvider, SnapshotFetchOptions, parse_json_failure, run_json, run_json_pages,
+    CliError, ForgeProvider, SnapshotFetchOptions, parse_json_failure, run_json_deadline,
+    run_json_pages,
 };
 
 #[derive(Debug, Clone)]
@@ -19,27 +20,34 @@ pub struct GitLabProvider;
 
 impl ForgeProvider for GitLabProvider {
     fn fetch_snapshot(&self, opts: &SnapshotFetchOptions) -> Result<PrSnapshot, CliError> {
-        let mr = parse_gitlab_mr_json(run_json("glab", &mr_view_args(opts), "glab mr view")?)?;
+        let mr = parse_gitlab_mr_json(run_json_deadline(
+            "glab",
+            &mr_view_args(opts),
+            "glab mr view",
+            opts.deadline,
+        )?)?;
         let checks = if let Some(pipeline_id) = &mr.pipeline_id {
-            fetch_pipeline_jobs(&mr.project_id, pipeline_id, &mr.host)?
+            fetch_pipeline_jobs(&mr.project_id, pipeline_id, &mr.host, opts.deadline)?
         } else {
             Vec::new()
         };
         let discussions = run_json_pages(
             |page, per_page| {
-                run_json(
+                run_json_deadline(
                     "glab",
                     &discussions_args(&mr.project_id, mr.snapshot.number, &mr.host, page, per_page),
                     &format!("glab api discussions page {page}"),
+                    opts.deadline,
                 )
             },
             "glab api discussions",
             100,
         )?;
-        let commit = run_json(
+        let commit = run_json_deadline(
             "glab",
             &commit_args(&mr.project_id, &mr.snapshot.head_oid, &mr.host),
             "glab api commit",
+            opts.deadline,
         )?;
         let mut snapshot = mr.snapshot;
         snapshot.head_committed_at = commit
@@ -286,13 +294,15 @@ fn fetch_pipeline_jobs(
     project_id: &str,
     pipeline_id: &str,
     host: &str,
+    deadline: Option<std::time::Instant>,
 ) -> Result<Vec<PrCheck>, CliError> {
     let values = run_json_pages(
         |page, per_page| {
-            run_json(
+            run_json_deadline(
                 "glab",
                 &jobs_args(project_id, pipeline_id, host, page, per_page),
                 &format!("glab api pipeline jobs page {page}"),
+                deadline,
             )
         },
         "glab api pipeline jobs",

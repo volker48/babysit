@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use serde_json::{Value, json};
 
 use babysit::bots::{adapter_for_login, distill_comment, normalize_bot_login, parse_nitpicks};
@@ -6,12 +8,26 @@ use babysit::core::{
     evaluate_settled, exit_code_for, hoist_shared_preamble, render_findings, render_status,
     unresolved_findings,
 };
-use babysit::forge::{collect_json_pages, run_json_pages};
+use babysit::forge::{collect_json_pages, run_json_deadline, run_json_pages};
 use babysit::github::{REVIEW_QUERY, parse_pr_view, parse_review_data, parse_review_data_for_head};
 use babysit::gitlab::{
     parse_gitlab_bot_reviews, parse_gitlab_findings, parse_gitlab_findings_for_head,
     parse_gitlab_jobs, parse_gitlab_mr,
 };
+
+#[test]
+fn expired_command_deadline_does_not_start_a_subprocess() {
+    let error = run_json_deadline(
+        "definitely-not-an-installed-command",
+        &[],
+        "deadline command",
+        Some(Instant::now() - Duration::from_secs(1)),
+    )
+    .unwrap_err();
+
+    assert!(error.retryable);
+    assert!(error.message.contains("operation timed out"));
+}
 
 fn fixture(name: &str) -> String {
     std::fs::read_to_string(format!("tests/fixtures/{name}")).unwrap()

@@ -2,11 +2,12 @@ use std::time::{Duration, Instant};
 
 use babysit::core::{CheckState, Finding, PrCheck, PrSnapshot, SettleOptions, exit_code_for};
 use babysit::forge::CliError;
-use babysit::wait::{WaitOutcome, WakeSource, wait_until_settled};
+use babysit::wait::{SnapshotAction, WaitOutcome, WakeSource, wait_until_settled};
 
 struct FakeWakeSource {
     now: Instant,
     waits: Vec<Duration>,
+    actions: Vec<SnapshotAction>,
 }
 
 impl FakeWakeSource {
@@ -14,6 +15,7 @@ impl FakeWakeSource {
         Self {
             now: Instant::now(),
             waits: Vec::new(),
+            actions: Vec::new(),
         }
     }
 }
@@ -23,9 +25,35 @@ impl WakeSource for FakeWakeSource {
         self.now
     }
 
-    fn wait(&mut self, duration: Duration) {
+    fn wait(&mut self, duration: Duration) -> Result<(), CliError> {
         self.waits.push(duration);
         self.now += duration;
+        Ok(())
+    }
+
+    fn observe_snapshot(
+        &mut self,
+        _snapshot: &PrSnapshot,
+        _remaining: Duration,
+    ) -> Result<SnapshotAction, CliError> {
+        Ok(self.actions.pop().unwrap_or(SnapshotAction::Wait))
+    }
+}
+
+struct ClockWakeSource {
+    now: std::rc::Rc<std::cell::RefCell<Instant>>,
+    waits: Vec<Duration>,
+}
+
+impl WakeSource for ClockWakeSource {
+    fn now(&self) -> Instant {
+        *self.now.borrow()
+    }
+
+    fn wait(&mut self, duration: Duration) -> Result<(), CliError> {
+        self.waits.push(duration);
+        *self.now.borrow_mut() += duration;
+        Ok(())
     }
 }
 
@@ -48,11 +76,104 @@ fn snapshot(state: &str) -> PrSnapshot {
 }
 
 #[test]
+fn fetches_receive_shrinking_remaining_budget() {
+    let clock = std::rc::Rc::new(std::cell::RefCell::new(Instant::now()));
+    let mut wake_source = ClockWakeSource {
+        now: clock.clone(),
+        waits: Vec::new(),
+    };
+    let mut budgets = Vec::new();
+    let mut states = ["OPEN", "CLOSED"].into_iter();
+    let outcome = wait_until_settled(
+        &mut |remaining| {
+            budgets.push(remaining);
+            Ok(snapshot(states.next().unwrap()))
+        },
+        &mut wake_source,
+        Duration::from_secs(5),
+        Duration::from_secs(2),
+        &SettleOptions::default(),
+    )
+    .unwrap();
+
+    assert!(matches!(outcome, WaitOutcome::Settled { .. }));
+    assert_eq!(budgets, [Duration::from_secs(5), Duration::from_secs(3)]);
+}
+
+#[test]
+fn settled_snapshot_after_deadline_times_out_without_accepting_it() {
+    let clock = std::rc::Rc::new(std::cell::RefCell::new(Instant::now()));
+    let mut wake_source = ClockWakeSource {
+        now: clock.clone(),
+        waits: Vec::new(),
+    };
+    let outcome = wait_until_settled(
+        &mut |_| {
+            *clock.borrow_mut() += Duration::from_secs(5);
+            Ok(snapshot("CLOSED"))
+        },
+        &mut wake_source,
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        &SettleOptions::default(),
+    )
+    .unwrap();
+
+    assert!(matches!(outcome, WaitOutcome::TimedOutWithoutSnapshot));
+}
+
+#[test]
+fn retryable_fetch_at_deadline_uses_the_last_snapshot() {
+    let clock = std::rc::Rc::new(std::cell::RefCell::new(Instant::now()));
+    let mut wake_source = ClockWakeSource {
+        now: clock.clone(),
+        waits: Vec::new(),
+    };
+    let mut calls = 0;
+    let outcome = wait_until_settled(
+        &mut |_| {
+            calls += 1;
+            if calls == 1 {
+                Ok(snapshot("OPEN"))
+            } else {
+                *clock.borrow_mut() += Duration::from_secs(1);
+                Err(CliError::new("fetch timed out", true))
+            }
+        },
+        &mut wake_source,
+        Duration::from_secs(2),
+        Duration::from_secs(1),
+        &SettleOptions::default(),
+    )
+    .unwrap();
+
+    assert!(matches!(outcome, WaitOutcome::TimedOut { .. }));
+}
+
+#[test]
+fn source_requested_refetch_skips_sleep_and_uses_authoritative_snapshot() {
+    let mut wake_source = FakeWakeSource::new();
+    wake_source.actions.push(SnapshotAction::RefetchNow);
+    let mut snapshots = vec![snapshot("OPEN"), snapshot("CLOSED")].into_iter();
+    let outcome = wait_until_settled(
+        &mut |_| Ok(snapshots.next().unwrap()),
+        &mut wake_source,
+        Duration::from_secs(60),
+        Duration::from_secs(30),
+        &SettleOptions::default(),
+    )
+    .unwrap();
+
+    assert!(matches!(outcome, WaitOutcome::Settled { .. }));
+    assert!(wake_source.waits.is_empty());
+}
+
+#[test]
 fn settled_clean() {
     let mut wake_source = FakeWakeSource::new();
     let mut fetches = 0;
     let outcome = wait_until_settled(
-        &mut || {
+        &mut |_| {
             fetches += 1;
             Ok(snapshot("CLOSED"))
         },
@@ -87,7 +208,7 @@ fn unsettled_snapshot_waits_then_returns_unresolved() {
     });
     let mut snapshots = vec![snapshot("OPEN"), settled].into_iter();
     let outcome = wait_until_settled(
-        &mut || Ok(snapshots.next().unwrap()),
+        &mut |_| Ok(snapshots.next().unwrap()),
         &mut wake_source,
         Duration::from_secs(60),
         Duration::from_secs(30),
@@ -111,7 +232,7 @@ fn settled_failed_checks_preserve_exit_code() {
         state: CheckState::Failed,
     });
     let outcome = wait_until_settled(
-        &mut || Ok(failed.clone()),
+        &mut |_| Ok(failed.clone()),
         &mut wake_source,
         Duration::from_secs(60),
         Duration::from_secs(30),
@@ -131,7 +252,7 @@ fn pending_snapshot_times_out() {
     let mut wake_source = FakeWakeSource::new();
     let mut fetches = 0;
     let outcome = wait_until_settled(
-        &mut || {
+        &mut |_| {
             fetches += 1;
             Ok(snapshot("OPEN"))
         },
@@ -145,7 +266,7 @@ fn pending_snapshot_times_out() {
     let WaitOutcome::TimedOut { snapshot, settle } = outcome else {
         panic!("expected timeout outcome");
     };
-    assert_eq!(fetches, 3);
+    assert_eq!(fetches, 2);
     assert_eq!(
         wake_source.waits,
         [Duration::from_secs(45), Duration::from_secs(15)]
@@ -162,7 +283,7 @@ fn retryable_error_waits_and_retries() {
     ]
     .into_iter();
     let outcome = wait_until_settled(
-        &mut || results.next().unwrap(),
+        &mut |_| results.next().unwrap(),
         &mut wake_source,
         Duration::from_secs(60),
         Duration::from_secs(30),
@@ -181,7 +302,7 @@ fn retryable_error_waits_and_retries() {
 fn non_retryable_error_returns_immediately() {
     let mut wake_source = FakeWakeSource::new();
     let error = wait_until_settled(
-        &mut || Err(CliError::new("invalid forge response", false)),
+        &mut |_| Err(CliError::new("invalid forge response", false)),
         &mut wake_source,
         Duration::from_secs(60),
         Duration::from_secs(30),
@@ -197,17 +318,15 @@ fn non_retryable_error_returns_immediately() {
 #[test]
 fn retryable_error_at_deadline_returns_immediately() {
     let mut wake_source = FakeWakeSource::new();
-    let error = wait_until_settled(
-        &mut || Err(CliError::new("deadline forge failure", true)),
+    let outcome = wait_until_settled(
+        &mut |_| Err(CliError::new("deadline forge failure", true)),
         &mut wake_source,
         Duration::ZERO,
         Duration::from_secs(30),
         &SettleOptions::default(),
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(error.message, "deadline forge failure");
-    assert_eq!(error.exit_code, 4);
-    assert!(error.retryable);
+    assert!(matches!(outcome, WaitOutcome::TimedOutWithoutSnapshot));
     assert!(wake_source.waits.is_empty());
 }

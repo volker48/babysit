@@ -4,7 +4,13 @@ The test suite is fixture-heavy and focuses on deterministic parser/domain behav
 
 ## Test files
 
-- `/tests/babysit_cli.rs` covers argument parsing, defaults, inline flags, validation errors, wait-only flag restrictions, duration bounds, and forge auto-detection from remote URLs.
+- `/tests/babysit_cli.rs` covers argument parsing, defaults, inline flags, validation errors,
+  wait-only flag restrictions, duration bounds, and forge auto-detection from remote URLs.
+- `/tests/wait_loop.rs` covers polling cadence, deadline behavior, and immediate authoritative
+  refetch requests from a wake source.
+- `/tests/credentials.rs` covers token-store behavior with an in-memory fake.
+- `/tests/event_wait.rs` uses scripted WebSocket and token-store boundaries to cover ready/cursor,
+  wake/replay, re-registration, malformed configuration, and fatal authorization behavior.
 - `/tests/babysit.rs` covers core domain behavior, rendering, settle/exit-code rules, bot Markdown distillation, GitHub parsing, GitLab parsing, pagination helpers, and nitpick behavior.
 - `/tests/fixtures/` stores representative JSON and Markdown payloads from PR/MR views, bot comments, GitLab discussions/jobs, and review bodies.
 
@@ -31,6 +37,20 @@ During this OpenWiki initialization, `cargo` was not installed in the execution 
 - `build`: `release` job that runs `cargo build --locked --release` and publishes `target/release/babysit` as a 7-day artifact.
 
 The pipeline caches Cargo registry/git data and `target/`, keyed by `Cargo.lock`. Jobs install `rustfmt` and `clippy` in `before_script`.
+
+## Event and credential boundaries
+
+Tests never connect to a live gateway, GitHub, Keychain, or clock. They script only the
+network/credential boundaries and exercise `wait_until_settled`, so event frame data cannot become
+an authority for settlement. A macOS target check catches the cfg-gated Keychain adapter without
+accessing a real Keychain:
+
+```bash
+rustup target add x86_64-apple-darwin
+cargo check --locked --all-targets --target x86_64-apple-darwin
+```
+
+Live webhook/gateway validation belongs to the gateway work, not this CLI client.
 
 ## Fixture strategy
 
