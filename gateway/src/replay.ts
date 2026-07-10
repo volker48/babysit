@@ -1,19 +1,17 @@
+import { matchesWake, selectWakeRoute, type WakeEvent, type WakeRegistration } from "./wake";
+
 export const WAKE_RETENTION_MS = 6 * 60 * 60 * 1000;
-export const DEBOUNCE_WINDOW_MS = 2_000;
 
-export type WakeKind = string;
-
-export interface WakeInput {
-  deliveryId: string;
-  kind: WakeKind;
-  repositoryId: number;
-  prNumber: number | null;
-  headOid: string | null;
-}
-
-export interface StoredWake extends WakeInput {
+interface StoredWake {
+  [key: string]: SqlStorageValue;
   cursor: number;
-  receivedAtMs: number;
+  received_at_ms: number;
+  kind: string;
+  delivery_id: string | null;
+  repository_id: string | null;
+  repository_full_name: string | null;
+  pr_number: number | null;
+  head_oid: string | null;
 }
 
 export interface ResumeResult {
@@ -22,42 +20,24 @@ export interface ResumeResult {
   resync: boolean;
 }
 
-export interface AcceptedWake {
-  wake: StoredWake | null;
-  alarmAt: number | null;
-}
-
-interface WakeRow {
-  [key: string]: SqlStorageValue;
-  cursor: number;
-  delivery_id: string | null;
-  kind: WakeKind;
-  repository_id: number | null;
-  pr_number: number | null;
-  head_oid: string | null;
-  received_at_ms: number;
-}
-
-interface BrokerState {
-  [key: string]: SqlStorageValue;
-  current_cursor: number;
-  debounce_leading_cursor: number | null;
-  debounce_pending_cursor: number | null;
-  debounce_until_ms: number | null;
-}
-
-/** Persists compact wake replay history and delivery deduplication for one repository. */
+/** Persists compact wake metadata and the repository broker replay window. */
 export class WakeHistory {
   constructor(private readonly storage: DurableObjectStorage) {
-    this.createBrokerState();
-    this.migrateWakeEvents();
     this.storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS delivery_dedupe (delivery_id TEXT PRIMARY KEY, " +
-        "received_at_ms INTEGER NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS broker_state (id INTEGER PRIMARY KEY CHECK (id = 1), " +
+        "current_cursor INTEGER NOT NULL)",
     );
     this.storage.sql.exec(
-      "CREATE INDEX IF NOT EXISTS delivery_dedupe_received_at ON delivery_dedupe (received_at_ms)",
+      "CREATE TABLE IF NOT EXISTS wake_events (" +
+        "cursor INTEGER PRIMARY KEY, received_at_ms INTEGER NOT NULL, kind TEXT NOT NULL, " +
+        "head_oid TEXT, pr_number INTEGER, delivery_id TEXT, repository_id TEXT, " +
+        "repository_full_name TEXT)",
     );
+    this.ensureWakeColumns();
+    this.storage.sql.exec(
+      "CREATE INDEX IF NOT EXISTS wake_events_received_at ON wake_events (received_at_ms)",
+    );
+    this.storage.sql.exec("INSERT OR IGNORE INTO broker_state (id, current_cursor) VALUES (1, 0)");
   }
 
   async migrateLegacyCursor(): Promise<void> {
@@ -73,60 +53,28 @@ export class WakeHistory {
     await this.storage.delete("cursor");
   }
 
-  accept(input: WakeInput, now: number): AcceptedWake {
+  append(wake: WakeEvent): number {
     return this.storage.transactionSync(() => {
-      this.prune(now);
-      if (this.hasDelivery(input.deliveryId)) {
-        return { wake: null, alarmAt: this.brokerState().debounce_until_ms };
-      }
-
+      const cursor = this.currentCursor() + 1;
+      this.storage.sql.exec("UPDATE broker_state SET current_cursor = ? WHERE id = 1", cursor);
       this.storage.sql.exec(
-        "INSERT INTO delivery_dedupe (delivery_id, received_at_ms) VALUES (?, ?)",
-        input.deliveryId,
-        now,
+        "INSERT INTO wake_events (cursor, received_at_ms, kind, head_oid, pr_number, delivery_id, " +
+          "repository_id, repository_full_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        cursor,
+        wake.receivedAt,
+        wake.kind,
+        wake.headRevision ?? "",
+        wake.changeNumber ?? null,
+        wake.deliveryId,
+        wake.repository.id,
+        wake.repository.fullName,
       );
-      const wake = this.append(input, now);
-      const state = this.brokerState();
-      if (state.debounce_until_ms === null || state.debounce_until_ms <= now) {
-        const alarmAt = now + DEBOUNCE_WINDOW_MS;
-        this.storage.sql.exec(
-          "UPDATE broker_state SET debounce_leading_cursor = ?, debounce_pending_cursor = ?, " +
-            "debounce_until_ms = ? WHERE id = 1",
-          wake.cursor,
-          wake.cursor,
-          alarmAt,
-        );
-        return { wake, alarmAt };
-      }
-
-      this.storage.sql.exec(
-        "UPDATE broker_state SET debounce_pending_cursor = ? WHERE id = 1",
-        wake.cursor,
-      );
-      return { wake: null, alarmAt: null };
+      this.prune(wake.receivedAt);
+      return cursor;
     });
   }
 
-  takeTrailingWake(now: number): { wake: StoredWake | null; alarmAt: number | null } {
-    return this.storage.transactionSync(() => {
-      const state = this.brokerState();
-      if (state.debounce_until_ms === null || state.debounce_leading_cursor === null) {
-        return { wake: null, alarmAt: null };
-      }
-      if (state.debounce_until_ms > now) return { wake: null, alarmAt: state.debounce_until_ms };
-
-      this.storage.sql.exec(
-        "UPDATE broker_state SET debounce_leading_cursor = NULL, debounce_pending_cursor = NULL, " +
-          "debounce_until_ms = NULL WHERE id = 1",
-      );
-      if (state.debounce_pending_cursor === state.debounce_leading_cursor) {
-        return { wake: null, alarmAt: null };
-      }
-      return { wake: this.wakeAt(state.debounce_pending_cursor), alarmAt: null };
-    });
-  }
-
-  resume(after: number | null, headOid: string, now: number): ResumeResult {
+  resume(after: number | null, registration: WakeRegistration, now: number): ResumeResult {
     return this.storage.transactionSync(() => {
       this.prune(now);
       const cursor = this.currentCursor();
@@ -134,126 +82,39 @@ export class WakeHistory {
       if (after > cursor || !this.isRetainedCursor(after, cursor)) {
         return { cursor, replay: [], resync: true };
       }
-      const replay = this.storage.sql
-        .exec<WakeRow>(
-          "SELECT cursor, head_oid FROM wake_events " +
-            "WHERE cursor > ? AND head_oid = ? ORDER BY cursor ASC",
+      const events = this.storage.sql
+        .exec<StoredWake>(
+          "SELECT cursor, received_at_ms, kind, delivery_id, repository_id, repository_full_name, " +
+            "pr_number, head_oid FROM wake_events WHERE cursor > ? ORDER BY cursor ASC",
           after,
-          headOid,
         )
         .toArray()
-        .map((event) => event.cursor);
+        .map(wakeFromRow);
+      if (events.some((event) => event === null)) return { cursor, replay: [], resync: true };
+      const replay = events.flatMap((event) => {
+        if (!event) return [];
+        const route = selectWakeRoute(event.wake, [registration]);
+        return matchesWake(event.wake, registration, route) ? [event.cursor] : [];
+      });
       return { cursor, replay, resync: false };
     });
   }
 
-  private createBrokerState(): void {
-    this.storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS broker_state (id INTEGER PRIMARY KEY CHECK (id = 1), " +
-        "current_cursor INTEGER NOT NULL)",
-    );
-    this.addBrokerColumn("debounce_leading_cursor");
-    this.addBrokerColumn("debounce_pending_cursor");
-    this.addBrokerColumn("debounce_until_ms");
-    this.storage.sql.exec("INSERT OR IGNORE INTO broker_state (id, current_cursor) VALUES (1, 0)");
-  }
-
-  private addBrokerColumn(column: string): void {
-    if (this.tableColumns("broker_state").includes(column)) return;
-    this.storage.sql.exec(`ALTER TABLE broker_state ADD COLUMN ${column} INTEGER`);
-  }
-
-  private migrateWakeEvents(): void {
-    const columns = this.tableColumns("wake_events");
-    if (columns.length > 0 && !columns.includes("repository_id")) {
-      this.storage.transactionSync(() => {
-        this.storage.sql.exec("ALTER TABLE wake_events RENAME TO wake_events_legacy");
-        this.createWakeEvents();
-        this.storage.sql.exec(
-          "INSERT INTO wake_events " +
-            "(cursor, delivery_id, kind, repository_id, pr_number, head_oid, received_at_ms) " +
-            "SELECT cursor, delivery_id, kind, NULL, pr_number, head_oid, received_at_ms " +
-            "FROM wake_events_legacy",
-        );
-        this.storage.sql.exec("DROP TABLE wake_events_legacy");
-      });
-    } else {
-      this.createWakeEvents();
+  private ensureWakeColumns(): void {
+    const columns = this.storage.sql
+      .exec<{ [key: string]: SqlStorageValue; name: string }>("PRAGMA table_info(wake_events)")
+      .toArray()
+      .map((column) => column.name);
+    for (const column of ["repository_id", "repository_full_name"]) {
+      if (!columns.includes(column))
+        this.storage.sql.exec(`ALTER TABLE wake_events ADD COLUMN ${column} TEXT`);
     }
-    this.storage.sql.exec(
-      "CREATE INDEX IF NOT EXISTS wake_events_received_at ON wake_events (received_at_ms)",
-    );
-  }
-
-  private createWakeEvents(): void {
-    this.storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS wake_events (" +
-        "cursor INTEGER PRIMARY KEY, delivery_id TEXT, kind TEXT NOT NULL, repository_id INTEGER, " +
-        "pr_number INTEGER, head_oid TEXT, received_at_ms INTEGER NOT NULL)",
-    );
-  }
-
-  private append(input: WakeInput, now: number): StoredWake {
-    const cursor = this.currentCursor() + 1;
-    this.storage.sql.exec("UPDATE broker_state SET current_cursor = ? WHERE id = 1", cursor);
-    this.storage.sql.exec(
-      "INSERT INTO wake_events " +
-        "(cursor, delivery_id, kind, repository_id, pr_number, head_oid, received_at_ms) " +
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-      cursor,
-      input.deliveryId,
-      input.kind,
-      input.repositoryId,
-      input.prNumber,
-      input.headOid,
-      now,
-    );
-    return { ...input, cursor, receivedAtMs: now };
-  }
-
-  private wakeAt(cursor: number | null): StoredWake | null {
-    if (cursor === null) return null;
-    const row = this.storage.sql
-      .exec<WakeRow>(
-        "SELECT cursor, delivery_id, kind, repository_id, pr_number, head_oid, received_at_ms " +
-          "FROM wake_events WHERE cursor = ?",
-        cursor,
-      )
-      .toArray()[0];
-    if (!row || row.delivery_id === null || row.repository_id === null) return null;
-    return {
-      cursor: row.cursor,
-      deliveryId: row.delivery_id,
-      kind: row.kind,
-      repositoryId: row.repository_id,
-      prNumber: row.pr_number,
-      headOid: row.head_oid,
-      receivedAtMs: row.received_at_ms,
-    };
-  }
-
-  private brokerState(): BrokerState {
-    return this.storage.sql
-      .exec<BrokerState>(
-        "SELECT current_cursor, debounce_leading_cursor, debounce_pending_cursor, debounce_until_ms " +
-          "FROM broker_state WHERE id = 1",
-      )
-      .one();
   }
 
   private currentCursor(): number {
-    return this.brokerState().current_cursor;
-  }
-
-  private hasDelivery(deliveryId: string): boolean {
-    return (
-      this.storage.sql
-        .exec<{ delivery_id: string }>(
-          "SELECT delivery_id FROM delivery_dedupe WHERE delivery_id = ?",
-          deliveryId,
-        )
-        .toArray().length > 0
-    );
+    return this.storage.sql
+      .exec<{ current_cursor: number }>("SELECT current_cursor FROM broker_state WHERE id = 1")
+      .one().current_cursor;
   }
 
   private isRetainedCursor(after: number, cursor: number): boolean {
@@ -266,15 +127,43 @@ export class WakeHistory {
   }
 
   private prune(now: number): void {
-    const cutoff = now - WAKE_RETENTION_MS;
-    this.storage.sql.exec("DELETE FROM wake_events WHERE received_at_ms < ?", cutoff);
-    this.storage.sql.exec("DELETE FROM delivery_dedupe WHERE received_at_ms < ?", cutoff);
+    this.storage.sql.exec(
+      "DELETE FROM wake_events WHERE received_at_ms < ?",
+      now - WAKE_RETENTION_MS,
+    );
   }
+}
 
-  private tableColumns(table: string): string[] {
-    return this.storage.sql
-      .exec<{ name: string }>(`PRAGMA table_info(${table})`)
-      .toArray()
-      .map((column) => column.name);
+function wakeFromRow(row: StoredWake): { cursor: number; wake: WakeEvent } | null {
+  if (
+    !Number.isSafeInteger(row.cursor) ||
+    !Number.isSafeInteger(row.received_at_ms) ||
+    typeof row.kind !== "string" ||
+    typeof row.delivery_id !== "string" ||
+    typeof row.repository_id !== "string" ||
+    typeof row.repository_full_name !== "string" ||
+    !optionalNumber(row.pr_number) ||
+    !optionalString(row.head_oid)
+  ) {
+    return null;
   }
+  return {
+    cursor: row.cursor,
+    wake: {
+      deliveryId: row.delivery_id,
+      kind: row.kind,
+      repository: { id: row.repository_id, fullName: row.repository_full_name },
+      changeNumber: row.pr_number ?? undefined,
+      headRevision: row.head_oid || undefined,
+      receivedAt: row.received_at_ms,
+    },
+  };
+}
+
+function optionalNumber(value: number | null): boolean {
+  return value === null || Number.isSafeInteger(value);
+}
+
+function optionalString(value: string | null): boolean {
+  return value === null || typeof value === "string";
 }

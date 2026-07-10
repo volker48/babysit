@@ -1,0 +1,7 @@
+{
+  "repository": { "id": 1015, "full_name": "multi-check-runs/repo" },
+  "check_run": {
+    "pull_requests": [{ "number": 7 }, { "number": 8 }],
+    "head_sha": "multi-check-head"
+  }
+}
