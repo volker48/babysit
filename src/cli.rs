@@ -1,5 +1,4 @@
-use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const MAX_WAIT_SECONDS: u64 = 30 * 24 * 60 * 60;
 
@@ -13,6 +12,7 @@ use crate::forge::{
 };
 use crate::github::create_github_provider;
 use crate::gitlab::create_gitlab_provider;
+use crate::wait::{PollingWakeSource, WaitOutcome, wait_until_settled};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandName {
@@ -269,26 +269,21 @@ fn run_findings(opts: &CliOptions) -> Result<i32, CliError> {
 }
 
 fn run_wait(opts: &CliOptions) -> Result<i32, CliError> {
-    let deadline = Instant::now()
-        .checked_add(Duration::from_secs(opts.timeout_secs))
-        .ok_or_else(|| CliError::new("--timeout is too large", false))?;
-    loop {
-        match fetch_snapshot(opts) {
-            Ok(snapshot) => {
-                let settle = evaluate_settled(&snapshot, &settle_options(opts));
-                if settle.settled {
-                    return finish_wait(&snapshot, &settle, opts);
-                }
-                if Instant::now() >= deadline {
-                    println!("{}", wait_output(&snapshot, &settle, opts, Some("TIMEOUT")));
-                    return Ok(3);
-                }
-            }
-            Err(error) if error.retryable && Instant::now() < deadline => {}
-            Err(error) => return Err(error),
+    let mut wake_source = PollingWakeSource;
+    let mut fetcher = || fetch_snapshot(opts);
+    let outcome = wait_until_settled(
+        &mut fetcher,
+        &mut wake_source,
+        Duration::from_secs(opts.timeout_secs),
+        Duration::from_secs(opts.interval_secs),
+        &settle_options(opts),
+    )?;
+    match outcome {
+        WaitOutcome::Settled { snapshot, settle } => finish_wait(&snapshot, &settle, opts),
+        WaitOutcome::TimedOut { snapshot, settle } => {
+            println!("{}", wait_output(&snapshot, &settle, opts, Some("TIMEOUT")));
+            Ok(3)
         }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        sleep(Duration::from_secs(opts.interval_secs).min(remaining));
     }
 }
 
