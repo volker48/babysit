@@ -5,7 +5,7 @@ description: Watch a GitHub pull request or GitLab merge request until CI checks
 
 # babysit
 
-This is a Claude Code discovery wrapper for the canonical repository skill at
+This is a Codex discovery wrapper for the canonical repository skill at
 `skills/babysit/SKILL.md`.
 
 Before using this skill, read `skills/babysit/SKILL.md` from the repository root and follow its

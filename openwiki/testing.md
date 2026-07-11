@@ -11,6 +11,8 @@ The test suite is fixture-heavy and focuses on deterministic parser/domain behav
 - `/tests/credentials.rs` covers token-store behavior with an in-memory fake.
 - `/tests/event_wait.rs` uses scripted WebSocket and token-store boundaries to cover ready/cursor,
   wake/replay, re-registration, malformed configuration, and fatal authorization behavior.
+- `/tests/skill_layout.rs` keeps repo-local Claude/Codex discovery wrappers aligned with the
+  canonical `/skills/babysit/SKILL.md` metadata.
 - `/tests/babysit.rs` covers core domain behavior, rendering, settle/exit-code rules, bot Markdown distillation, GitHub parsing, GitLab strict parsing, pagination helpers, and nitpick behavior. GitHub module tests cover bounded,
 progressing review-thread cursors.
 - `/tests/fixtures/` stores representative JSON and Markdown payloads from PR/MR views, bot comments, GitLab discussions/jobs, and review bodies.
