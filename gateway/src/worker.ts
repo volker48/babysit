@@ -242,13 +242,20 @@ function isValidRegistration(
     watch.host === "github.com" &&
     typeof watch.repository === "string" &&
     typeof watch.number === "number" &&
+    Number.isSafeInteger(watch.number) &&
+    watch.number > 0 &&
     typeof watch.headOid === "string"
   );
 }
 
 function repositoryFromWatchPath(pathname: string): string | null {
   const match = /^\/watch\/([^/]+)\/([^/]+)$/.exec(pathname);
-  return match ? `${decodeURIComponent(match[1])}/${decodeURIComponent(match[2])}` : null;
+  if (!match) return null;
+  try {
+    return `${decodeURIComponent(match[1])}/${decodeURIComponent(match[2])}`;
+  } catch {
+    return null;
+  }
 }
 
 async function hasValidSignature(

@@ -466,6 +466,39 @@ fn gitlab_rejects_malformed_mr_web_url() {
 }
 
 #[test]
+fn gitlab_rejects_missing_required_mr_fields() {
+    for field in [
+        "project_id",
+        "iid",
+        "title",
+        "state",
+        "source_branch",
+        "target_branch",
+        "sha",
+    ] {
+        let mut raw = fixture_json("gitlab-mr-open.json");
+        raw.as_object_mut().unwrap().remove(field);
+
+        let error = parse_gitlab_mr(&raw).unwrap_err();
+
+        assert!(
+            error.to_string().contains(field),
+            "missing {field} produced: {error}"
+        );
+    }
+}
+
+#[test]
+fn gitlab_rejects_malformed_pipeline_id() {
+    let mut raw = fixture_json("gitlab-mr-open.json");
+    raw["head_pipeline"] = json!({});
+
+    let error = parse_gitlab_mr(&raw).unwrap_err();
+
+    assert!(error.to_string().contains("head_pipeline.id"));
+}
+
+#[test]
 fn gitlab_maps_job_statuses() {
     let states: Vec<_> = parse_gitlab_jobs(&fixture_json("gitlab-jobs.json"))
         .into_iter()

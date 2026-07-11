@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use regex::Regex;
 use serde_json::Value;
 
@@ -9,6 +11,8 @@ use crate::forge::{
     CliError, ForgeProvider, SnapshotFetchOptions, pagination_failure, parse_json_failure,
     run_json_deadline,
 };
+
+const MAX_REVIEW_PAGES: usize = 100;
 
 pub const REVIEW_QUERY: &str = r#"
 query($owner: String!, $name: String!, $number: Int!, $reviewThreadsCursor: String) {
@@ -315,34 +319,58 @@ fn fetch_review_data(
     bots: &[String],
     deadline: Option<std::time::Instant>,
 ) -> Result<ReviewData, CliError> {
-    let mut first = run_json_deadline(
+    let first = run_json_deadline(
         "gh",
         &review_args(snapshot, None),
         "gh api graphql",
         deadline,
     )?;
-    loop {
-        let page_info = &first["data"]["repository"]["pullRequest"]["reviewThreads"]["pageInfo"];
-        if !page_info["hasNextPage"].as_bool().unwrap_or(false) {
-            break;
-        }
-        let cursor = page_info["endCursor"]
-            .as_str()
-            .ok_or_else(|| pagination_failure("gh api graphql pagination"))?;
-        let next = run_json_deadline(
+    let pages = collect_review_pages(first, |cursor| {
+        run_json_deadline(
             "gh",
             &review_args(snapshot, Some(cursor)),
             "gh api graphql",
             deadline,
-        )?;
-        append_review_threads(&mut first, &next);
-    }
+        )
+    })?;
     Ok(parse_review_data_for_head(
-        &first,
+        &pages,
         bots,
         &snapshot.head_oid,
         snapshot.head_committed_at.as_deref(),
     ))
+}
+
+fn collect_review_pages<F>(mut first: Value, mut fetch_page: F) -> Result<Value, CliError>
+where
+    F: FnMut(&str) -> Result<Value, CliError>,
+{
+    let mut pages = 1;
+    let mut seen_cursors = HashSet::new();
+    loop {
+        let page_info = &first["data"]["repository"]["pullRequest"]["reviewThreads"]["pageInfo"];
+        if !page_info["hasNextPage"].as_bool().unwrap_or(false) {
+            return Ok(first);
+        }
+        let cursor = page_info["endCursor"]
+            .as_str()
+            .ok_or_else(|| pagination_failure("gh api graphql pagination"))?;
+        if !seen_cursors.insert(cursor.to_string()) {
+            return Err(parse_json_failure(
+                "gh api graphql pagination",
+                "cursor did not advance",
+            ));
+        }
+        if pages >= MAX_REVIEW_PAGES {
+            return Err(parse_json_failure(
+                "gh api graphql pagination",
+                format!("exceeded {MAX_REVIEW_PAGES} pages"),
+            ));
+        }
+        let next = fetch_page(cursor)?;
+        append_review_threads(&mut first, &next);
+        pages += 1;
+    }
 }
 
 fn append_review_threads(first: &mut Value, next: &Value) {
@@ -371,4 +399,78 @@ fn required_u64(raw: &Value, field: &str) -> Result<u64, String> {
     raw.get(field)
         .and_then(Value::as_u64)
         .ok_or_else(|| format!("missing {field}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn review_page(cursor: &str, has_next_page: bool) -> Value {
+        json!({
+            "data": {"repository": {"pullRequest": {
+                "reviews": {"nodes": []},
+                "reviewThreads": {
+                    "nodes": [],
+                    "pageInfo": {
+                        "hasNextPage": has_next_page,
+                        "endCursor": cursor
+                    }
+                }
+            }}}
+        })
+    }
+
+    #[test]
+    fn review_thread_pagination_aggregates_finite_pages() {
+        let mut first = review_page("next", true);
+        first["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"] =
+            json!([{"path": "first"}]);
+        let pages = collect_review_pages(first, |_| {
+            let mut next = review_page("done", false);
+            next["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"] =
+                json!([{"path": "second"}]);
+            Ok(next)
+        })
+        .unwrap();
+
+        let nodes = pages["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+            .as_array()
+            .unwrap();
+        assert_eq!(nodes.len(), 2);
+    }
+
+    #[test]
+    fn review_thread_pagination_rejects_a_repeated_cursor() {
+        let first = review_page("same", true);
+        let error = collect_review_pages(first, |_| Ok(review_page("same", true))).unwrap_err();
+
+        assert!(error.to_string().contains("cursor did not advance"));
+    }
+
+    #[test]
+    fn review_thread_pagination_rejects_a_cursor_cycle() {
+        let first = review_page("a", true);
+        let mut cursors = ["b", "a"].into_iter();
+        let error = collect_review_pages(first, |_| {
+            Ok(review_page(cursors.next().unwrap_or("a"), true))
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("cursor did not advance"));
+    }
+
+    #[test]
+    fn review_thread_pagination_has_a_hard_page_cap() {
+        let first = review_page("cursor-1", true);
+        let mut page = 1;
+        let error = collect_review_pages(first, |_| {
+            page += 1;
+            Ok(review_page(&format!("cursor-{page}"), true))
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("exceeded 100 pages"));
+        assert_eq!(page, 100);
+    }
 }

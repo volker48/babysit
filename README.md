@@ -38,6 +38,7 @@ npx skills add volker48/babysit
 ```bash
 babysit status|findings|wait [<pr-or-mr-number>] [options]
 babysit gateway-token <enroll|status|delete|rotate>
+babysit --help | --version
 ```
 
 Options:
@@ -53,6 +54,8 @@ Options:
 --interval <secs>        wait only; default 30 (event fallback default 300)
 --events                 wait only; opt in to GitHub event-assisted wakes
 --gateway-url <wss-url>  required with --events; exact non-secret wss://host/watch base URL
+-h, --help               Show help without contacting a forge
+-V, --version            Show the installed version
 ```
 
 Default bots are `coderabbitai`, `chatgpt-codex-connector`, and `cursor`.

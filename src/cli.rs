@@ -22,6 +22,8 @@ pub enum CommandName {
     Findings,
     Wait,
     GatewayToken,
+    Help,
+    Version,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,7 +67,16 @@ enum ValueFlag {
 }
 
 pub fn parse_args(argv: &[String]) -> Result<CliOptions, UsageError> {
+    if is_command_help(argv) {
+        return Ok(default_options(CommandName::Help));
+    }
     let command = parse_command(argv.first().map(String::as_str))?;
+    if matches!(command, CommandName::Help | CommandName::Version) {
+        if argv.len() > 1 {
+            return Err(UsageError::new("unexpected arguments"));
+        }
+        return Ok(default_options(command));
+    }
     if command == CommandName::GatewayToken {
         return parse_gateway_token_args(argv);
     }
@@ -88,9 +99,20 @@ fn parse_command(value: Option<&str>) -> Result<CommandName, UsageError> {
         Some("findings") => Ok(CommandName::Findings),
         Some("wait") => Ok(CommandName::Wait),
         Some("gateway-token") => Ok(CommandName::GatewayToken),
+        Some("--help" | "-h" | "help") => Ok(CommandName::Help),
+        Some("--version" | "-V") => Ok(CommandName::Version),
         Some(value) => Err(UsageError::new(format!("unknown subcommand: {value}"))),
         None => Err(UsageError::new("missing subcommand")),
     }
+}
+
+fn is_command_help(argv: &[String]) -> bool {
+    argv.len() == 2
+        && matches!(argv[1].as_str(), "--help" | "-h")
+        && matches!(
+            argv[0].as_str(),
+            "status" | "findings" | "wait" | "gateway-token"
+        )
 }
 
 fn default_options(command: CommandName) -> CliOptions {
@@ -316,6 +338,14 @@ fn run_inner(argv: &[String]) -> Result<i32, RunError> {
         CommandName::Findings => run_findings(&opts).map_err(RunError::Cli),
         CommandName::Wait => run_wait(&opts).map_err(RunError::Cli),
         CommandName::GatewayToken => run_gateway_token(&opts).map_err(RunError::Cli),
+        CommandName::Help => {
+            println!("{}", usage());
+            Ok(0)
+        }
+        CommandName::Version => {
+            println!("babysit {}", env!("CARGO_PKG_VERSION"));
+            Ok(0)
+        }
     }
 }
 
@@ -478,6 +508,7 @@ pub fn usage() -> String {
     [
         "Usage: babysit status|findings|wait [<pr>] [options]",
         "       babysit gateway-token <enroll|status|delete|rotate>",
+        "       babysit --help | --version",
         "Options:",
         "  -R, --repo <owner/repo>",
         "  --forge <github|gitlab>  default: auto (origin host containing gitlab => gitlab)",
@@ -489,6 +520,8 @@ pub fn usage() -> String {
         "  --interval <secs>       wait only (default 30; event fallback default 300)",
         "  --events                 wait only; requires --gateway-url",
         "  --gateway-url <wss-url>  event mode only",
+        "  -h, --help              show help",
+        "  -V, --version           show version",
     ]
     .join("\n")
 }

@@ -21,7 +21,7 @@ Forge auto-detection reads `git remote get-url origin`. Hosts containing `gitlab
 
 1. `gh pr view [<pr>] [-R <repo>] --json ...` fetches base PR metadata, head SHA, commits, URL-derived owner/repo, and status checks.
 2. `gh api graphql` runs `REVIEW_QUERY` to fetch recent reviews and review threads.
-3. Review threads are paginated with `reviewThreads(first: 100, after: $reviewThreadsCursor)` and appended until `hasNextPage` is false.
+3. Review threads are paginated with `reviewThreads(first: 100, after: $reviewThreadsCursor)`, capped at 100 pages, and rejected if the cursor stops advancing.
 4. Checks are normalized from both `CheckRun` and `StatusContext` payloads.
 5. Bot reviews and review-thread findings are parsed with bot adapters from `/src/bots.rs`.
 6. CodeRabbit nitpick review-body findings are appended only when `--nitpicks` is enabled and the review matches the current head.
@@ -33,7 +33,7 @@ Important tests in `/tests/babysit.rs` verify PR parsing, check-state mapping, G
 `/src/gitlab.rs` implements GitLab through `glab`:
 
 1. `glab mr view [<mr>] -F json [-R <repo>]` fetches MR metadata.
-2. The provider derives host, group/owner, and repo from `web_url`; project IDs and pipeline IDs come from the MR JSON.
+2. The provider parses required MR identity fields strictly, then derives host, group/owner, and repo from `web_url`; project IDs and pipeline IDs come from the MR JSON.
 3. If a head pipeline exists, `glab api projects/{project_id}/pipelines/{pipeline_id}/jobs?...` fetches pipeline jobs as checks.
 4. `glab api projects/{project_id}/merge_requests/{iid}/discussions?...` fetches MR discussions through the shared pagination helper.
 5. `glab api projects/{project_id}/repository/commits/{sha}` fetches the head commit timestamp.
