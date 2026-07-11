@@ -101,14 +101,17 @@ export class RepositoryGateway extends DurableObject<Env> {
       wake,
       watchers.map(({ registration }) => registration),
     );
+    let failed = false;
     for (const { socket, registration } of watchers) {
       if (!matchesWake(wake, registration, route)) continue;
       try {
         socket.send(frame("wake", cursor));
       } catch {
+        failed = true;
         console.warn("failed to deliver wake to watcher");
       }
     }
+    if (failed) throw new Error("wake delivery failed for one or more watchers");
   }
 }
 

@@ -171,9 +171,12 @@ async function startCli(
 
 async function stopChild(child: ReturnType<typeof spawn> | undefined): Promise<void> {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+  const closed = new Promise<true>((resolve) => child.once("close", () => resolve(true)));
   child.kill("SIGTERM");
-  await closed;
+  const exited = await Promise.race([closed, sleep(2_000).then(() => false)]);
+  if (exited) return;
+  child.kill("SIGKILL");
+  await Promise.race([closed, sleep(1_000)]);
 }
 
 function ghShim(): string {

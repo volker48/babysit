@@ -229,6 +229,9 @@ describe("GitHub status gateway", () => {
         }),
       );
       expect(response.status).toBe(202);
+      expect(state.storage.sql.exec("SELECT cursor FROM wake_outbox").toArray()).toEqual([
+        { cursor: 1 },
+      ]);
     });
 
     expect(await secondWake).toMatchObject({ type: "wake", cursor: 1 });
