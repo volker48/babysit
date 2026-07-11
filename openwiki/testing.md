@@ -4,14 +4,15 @@ The test suite is fixture-heavy and focuses on deterministic parser/domain behav
 
 ## Test files
 
-- `/tests/babysit_cli.rs` covers argument parsing, defaults, inline flags, validation errors,
-  wait-only flag restrictions, duration bounds, and forge auto-detection from remote URLs.
+- `/tests/babysit_cli.rs` covers argument parsing, help/version, defaults, inline flags, validation
+  errors, wait-only flag restrictions, duration bounds, and forge auto-detection from remote URLs.
 - `/tests/wait_loop.rs` covers polling cadence, deadline behavior, and immediate authoritative
   refetch requests from a wake source.
 - `/tests/credentials.rs` covers token-store behavior with an in-memory fake.
 - `/tests/event_wait.rs` uses scripted WebSocket and token-store boundaries to cover ready/cursor,
   wake/replay, re-registration, malformed configuration, and fatal authorization behavior.
-- `/tests/babysit.rs` covers core domain behavior, rendering, settle/exit-code rules, bot Markdown distillation, GitHub parsing, GitLab parsing, pagination helpers, and nitpick behavior.
+- `/tests/babysit.rs` covers core domain behavior, rendering, settle/exit-code rules, bot Markdown distillation, GitHub parsing, GitLab strict parsing, pagination helpers, and nitpick behavior. GitHub module tests cover bounded,
+progressing review-thread cursors.
 - `/tests/fixtures/` stores representative JSON and Markdown payloads from PR/MR views, bot comments, GitLab discussions/jobs, and review bodies.
 
 Because `/src/lib.rs` publicly exposes the modules, integration tests can call parser and rendering functions directly.

@@ -123,6 +123,30 @@ fn supports_inline_value_flags() {
 }
 
 #[test]
+fn parses_help_and_version_without_contacting_a_forge() {
+    for values in [
+        &["--help"][..],
+        &["-h"][..],
+        &["help"][..],
+        &["status", "--help"][..],
+        &["gateway-token", "--help"][..],
+    ] {
+        assert_eq!(
+            parse_args(&args(values)).unwrap().command,
+            CommandName::Help
+        );
+        assert_eq!(babysit::cli::run(&args(values)), 0);
+    }
+    for values in [&["--version"][..], &["-V"][..]] {
+        assert_eq!(
+            parse_args(&args(values)).unwrap().command,
+            CommandName::Version
+        );
+        assert_eq!(babysit::cli::run(&args(values)), 0);
+    }
+}
+
+#[test]
 fn rejects_unknown_or_missing_subcommands() {
     assert!(
         parse_args(&args(&[]))

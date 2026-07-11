@@ -78,6 +78,24 @@ function nextMessage(socket: WebSocket): Promise<Record<string, unknown>> {
   });
 }
 
+async function expectClose(socket: WebSocket, code: number): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error("timed out waiting for WebSocket close")),
+      5_000,
+    );
+    socket.addEventListener("close", (event) => {
+      clearTimeout(timeout);
+      try {
+        expect(event.code).toBe(code);
+        resolve();
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
+}
+
 async function expectNoMessage(socket: WebSocket): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const onMessage = () => {
@@ -111,6 +129,25 @@ function register(
 }
 
 describe("GitHub status gateway", () => {
+  it("returns not found for malformed watch-path escapes", async () => {
+    const response = await exports.default.fetch("https://gateway.test/watch/%ZZ/repo");
+
+    expect(response.status).toBe(404);
+  });
+
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects invalid watcher change number %s",
+    async (number) => {
+      const repository = "invalid-number/repo";
+      const socket = await watcher(repository);
+      const closed = expectClose(socket, 1008);
+
+      register(socket, repository, "head", null, number);
+
+      await closed;
+    },
+  );
+
   it("rejects unsigned and invalidly signed payloads before JSON parsing", async () => {
     const missing = await exports.default.fetch("https://gateway.test/webhooks/github", {
       method: "POST",

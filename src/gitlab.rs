@@ -67,38 +67,20 @@ pub fn create_gitlab_provider() -> GitLabProvider {
 }
 
 pub fn parse_gitlab_mr(raw: &Value) -> Result<GitLabMrParseResult, CliError> {
-    let project = parse_gitlab_project(raw.get("web_url").and_then(Value::as_str).unwrap_or(""))?;
+    let web_url = required_string(raw, "web_url")?;
+    let project = parse_gitlab_project(&web_url)?;
     Ok(GitLabMrParseResult {
-        project_id: raw
-            .get("project_id")
-            .map(value_to_string)
-            .unwrap_or_default(),
-        pipeline_id: raw["head_pipeline"].get("id").map(value_to_string),
+        project_id: required_id(raw, "project_id")?,
+        pipeline_id: optional_pipeline_id(raw)?,
         host: project.0,
         snapshot: PrSnapshot {
-            number: raw.get("iid").and_then(Value::as_u64).unwrap_or(0),
-            title: raw
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            state: gitlab_mr_state(raw.get("state").and_then(Value::as_str).unwrap_or("")),
+            number: required_positive_u64(raw, "iid")?,
+            title: required_string(raw, "title")?,
+            state: gitlab_mr_state(&required_string(raw, "state")?),
             is_draft: raw.get("draft").and_then(Value::as_bool).unwrap_or(false),
-            head_ref_name: raw
-                .get("source_branch")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            base_ref_name: raw
-                .get("target_branch")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            head_oid: raw
-                .get("sha")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
+            head_ref_name: required_string(raw, "source_branch")?,
+            base_ref_name: required_string(raw, "target_branch")?,
+            head_oid: required_string(raw, "sha")?,
             head_committed_at: None,
             owner: project.1,
             repo: project.2,
@@ -361,9 +343,40 @@ fn parse_gitlab_mr_json(raw: Value) -> Result<GitLabMrParseResult, CliError> {
     parse_gitlab_mr(&raw)
 }
 
-fn value_to_string(value: &Value) -> String {
-    value
-        .as_str()
+fn required_string(raw: &Value, field: &str) -> Result<String, CliError> {
+    raw.get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| value.to_string())
+        .ok_or_else(|| parse_json_failure("glab mr view", format!("missing or invalid {field}")))
+}
+
+fn required_positive_u64(raw: &Value, field: &str) -> Result<u64, CliError> {
+    raw.get(field)
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| parse_json_failure("glab mr view", format!("missing or invalid {field}")))
+}
+
+fn required_id(raw: &Value, field: &str) -> Result<String, CliError> {
+    let value = raw
+        .get(field)
+        .ok_or_else(|| parse_json_failure("glab mr view", format!("missing or invalid {field}")))?;
+    match value {
+        Value::String(value) if !value.is_empty() => Ok(value.clone()),
+        Value::Number(value) if value.as_u64().is_some_and(|id| id > 0) => Ok(value.to_string()),
+        _ => Err(parse_json_failure(
+            "glab mr view",
+            format!("missing or invalid {field}"),
+        )),
+    }
+}
+
+fn optional_pipeline_id(raw: &Value) -> Result<Option<String>, CliError> {
+    match raw.get("head_pipeline") {
+        None | Some(Value::Null) => Ok(None),
+        Some(pipeline) => required_id(pipeline, "id")
+            .map(Some)
+            .map_err(|_| parse_json_failure("glab mr view", "missing or invalid head_pipeline.id")),
+    }
 }
