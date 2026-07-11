@@ -4,6 +4,7 @@ import { access, chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { smokeDeliveryId } from "./smoke-delivery-id.js";
 import { smokeChildEnvironment } from "./smoke-env.js";
 
 const quietWindowMs = 500;
@@ -19,6 +20,7 @@ const realGh = findGh();
 const headOid = fetchHeadOid(realGh, pr, repository);
 const repositoryId = fetchRepositoryId(realGh, repository);
 const webhookUrl = webhookUrlFor(gatewayUrl);
+const deliveryId = smokeDeliveryId();
 const tempDir = await mkdtemp(join(tmpdir(), "babysit-smoke-"));
 const counter = join(tempDir, "gh-pr-view-count");
 let child: ReturnType<typeof spawn> | undefined;
@@ -26,7 +28,7 @@ try {
   child = await startCli(babysitBin, pr, repository, gatewayUrl, realGh, counter, tempDir);
   await waitForExactFetches(counter, 2, child);
   await waitForQuietCount(counter, 2, child);
-  await sendWebhook(webhookUrl, repository, repositoryId, headOid, webhookSecret);
+  await sendWebhook(webhookUrl, repository, repositoryId, headOid, webhookSecret, deliveryId);
   await waitForExactFetches(counter, 3, child);
   console.log("verified CLI initial, ready, and wake authoritative gh pr view fetches");
 } finally {
@@ -182,6 +184,7 @@ async function sendWebhook(
   repositoryId: number,
   headOid: string,
   secret: string,
+  deliveryId: string,
 ): Promise<void> {
   const body = JSON.stringify({
     repository: { id: repositoryId, full_name: repository },
@@ -192,7 +195,7 @@ async function sendWebhook(
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "x-github-delivery": "gateway-smoke-status",
+      "x-github-delivery": deliveryId,
       "x-github-event": "status",
       "x-hub-signature-256": `sha256=${signature}`,
     },
