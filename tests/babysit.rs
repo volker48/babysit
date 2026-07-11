@@ -274,6 +274,27 @@ fn bugbot_extracts_title_severity_detail_and_actionable_count() {
 }
 
 #[test]
+fn bot_distillers_accept_crlf_comment_bodies() {
+    let coderabbit = fixture("coderabbit-inline-comment.md").replace('\n', "\r\n");
+    let codex = fixture("codex-inline-comment.md").replace('\n', "\r\n");
+    let bugbot = fixture("bugbot-inline-comment.md").replace('\n', "\r\n");
+
+    assert!(
+        distill_comment("coderabbitai[bot]", &coderabbit)
+            .title
+            .contains("active statuses")
+    );
+    assert_eq!(
+        distill_comment("chatgpt-codex-connector[bot]", &codex).title,
+        "Do not report cancelling review races as completed"
+    );
+    assert_eq!(
+        distill_comment("cursor[bot]", &bugbot).severity.as_deref(),
+        Some("high")
+    );
+}
+
+#[test]
 fn parse_nitpicks_parses_real_review_body() {
     let nitpicks = parse_nitpicks(&fixture("coderabbit-review-body.md"), "coderabbit");
     assert_eq!(nitpicks.len(), 2);

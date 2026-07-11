@@ -81,7 +81,10 @@ fn token_values_are_accepted_only_when_nonempty_and_single_line() {
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn unsupported_platform_never_falls_back_to_environment_or_files() {
-    let error = babysit::credentials::production_store().load().unwrap_err();
+    let error = match babysit::credentials::production_store().load() {
+        Ok(_) => panic!("unsupported platform credential load unexpectedly succeeded"),
+        Err(error) => error,
+    };
     assert!(error.message.contains("macOS Keychain"));
     assert!(!error.message.contains("gateway-token"));
 }

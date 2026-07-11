@@ -1,5 +1,7 @@
 mod regexes;
 
+use std::borrow::Cow;
+
 use crate::core::Finding;
 
 pub const DEFAULT_BOTS: [&str; 3] = ["coderabbitai", "chatgpt-codex-connector", "cursor"];
@@ -114,6 +116,9 @@ fn known_or_generic_adapter(login: &str) -> BotAdapter {
 }
 
 fn generic_distill(body: &str) -> Distilled {
+    let body = normalize_line_endings(body);
+    let body = body.as_ref();
+
     Distilled {
         severity: None,
         title: first_prose_line(body),
@@ -140,6 +145,9 @@ fn parse_bugbot_actionable_count(body: &str) -> Option<u32> {
 }
 
 pub fn distill_code_rabbit(body: &str) -> Distilled {
+    let body = normalize_line_endings(body);
+    let body = body.as_ref();
+
     let mut severity = None;
     if let Some(header) = regexes::CODE_RABBIT_HEADER_RE.find(body) {
         for segment in header.as_str().split('|') {
@@ -159,6 +167,9 @@ pub fn distill_code_rabbit(body: &str) -> Distilled {
 }
 
 pub fn distill_codex(body: &str) -> Distilled {
+    let body = normalize_line_endings(body);
+    let body = body.as_ref();
+
     let severity = regexes::CODEX_SEVERITY_RE
         .captures(body)
         .and_then(|caps| caps.get(1).map(|m| format!("P{}", m.as_str())));
@@ -189,6 +200,9 @@ pub fn distill_codex(body: &str) -> Distilled {
 }
 
 pub fn distill_bugbot(body: &str) -> Distilled {
+    let body = normalize_line_endings(body);
+    let body = body.as_ref();
+
     let title = regexes::BUGBOT_TITLE_RE
         .captures(body)
         .and_then(|caps| caps.get(1).map(|m| m.as_str().trim().to_string()))
@@ -203,6 +217,14 @@ pub fn distill_bugbot(body: &str) -> Distilled {
         severity,
         title,
         detail,
+    }
+}
+
+fn normalize_line_endings(body: &str) -> Cow<'_, str> {
+    if body.contains('\r') {
+        Cow::Owned(body.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        Cow::Borrowed(body)
     }
 }
 
