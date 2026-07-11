@@ -1,0 +1,15 @@
+name = "babysit-gateway"
+main = "src/worker.ts"
+compatibility_date = "2026-07-10"
+workers_dev = false
+routes = [{ pattern = "babysit.mindgoblin.pw", custom_domain = true }]
+
+[[durable_objects.bindings]]
+name = "REPOSITORY_GATEWAY"
+class_name = "RepositoryGateway"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RepositoryGateway"]
+
+# Set WEBHOOK_SECRET and WATCHER_TOKEN with `wrangler secret put`; never commit their values.

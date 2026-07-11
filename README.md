@@ -37,6 +37,7 @@ npx skills add volker48/babysit
 
 ```bash
 babysit status|findings|wait [<pr-or-mr-number>] [options]
+babysit gateway-token <enroll|status|delete|rotate>
 ```
 
 Options:
@@ -48,8 +49,10 @@ Options:
 --all                    Include resolved and outdated findings
 --nitpicks               Include CodeRabbit nitpick review-body findings
 --no-reviews             Settle without waiting for a bot review
---timeout <secs>         wait only; default 1800
---interval <secs>        wait only; default 30
+--timeout <secs>         wait only; overall deadline, default 1800
+--interval <secs>        wait only; default 30 (event fallback default 300)
+--events                 wait only; opt in to GitHub event-assisted wakes
+--gateway-url <wss-url>  required with --events; exact non-secret wss://host/watch base URL
 ```
 
 Default bots are `coderabbitai`, `chatgpt-codex-connector`, and `cursor`.
@@ -73,6 +76,34 @@ Print status without requiring a bot review:
 ```bash
 babysit status 63 --repo example-org/example-repo --no-reviews
 ```
+
+### Event-assisted waits
+
+Polling is the default. To opt in to GitHub event-assisted wake signals, store an
+operator-provided gateway bearer token in the macOS Keychain, then provide the non-secret gateway
+URL:
+
+```bash
+babysit gateway-token enroll
+babysit wait 63 --repo example-org/example-repo --events \
+  --gateway-url wss://gateway.example/watch
+```
+
+Enrollment prompts for the token without echoing it. For protected automation, provide it through
+piped stdin from a credential manager; do not put it in an environment variable, command argument,
+or logs. `gateway-token rotate` also accepts protected stdin or a no-echo terminal prompt. `status`
+reports only whether it is configured; `delete` removes it. Tokens use Keychain service `babysit`
+and account `gateway-bearer-token`, are never read from environment variables or files, and macOS
+Keychain support is required for event mode.
+
+The gateway URL is required and must be exactly the `wss://host/watch` base URL, with no repository,
+query, fragment, or extra path. babysit appends percent-encoded owner and repository path segments
+from its authoritative snapshot. GitLab event mode is unavailable. An event is only a wake signal:
+babysit performs an authoritative GitHub fetch after gateway ready,
+wake, replay, resync, and fallback ticks. Without an explicit `--interval`, event mode uses a
+300-second fallback poll; an explicit interval wins. This client does not provision a gateway,
+webhook, Worker, or token server-side. For the manual Cloudflare deployment, webhook, Keychain,
+rotation, and troubleshooting procedure, see the [gateway operations runbook](openwiki/operations/gateway.md).
 
 ## Exit codes
 

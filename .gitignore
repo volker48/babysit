@@ -1,3 +1,6 @@
 target/
+node_modules/
+gateway/.dev.vars
+gateway/.wrangler/
 .DS_Store
 !.claude/

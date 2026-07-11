@@ -6,7 +6,8 @@ use crate::core::{
     BotReview, CheckState, PrCheck, PrSnapshot, ReviewData, ReviewThread, findings_from_threads,
 };
 use crate::forge::{
-    CliError, ForgeProvider, SnapshotFetchOptions, pagination_failure, parse_json_failure, run_json,
+    CliError, ForgeProvider, SnapshotFetchOptions, pagination_failure, parse_json_failure,
+    run_json_deadline,
 };
 
 pub const REVIEW_QUERY: &str = r#"
@@ -50,8 +51,13 @@ pub struct GitHubProvider;
 
 impl ForgeProvider for GitHubProvider {
     fn fetch_snapshot(&self, opts: &SnapshotFetchOptions) -> Result<PrSnapshot, CliError> {
-        let mut snapshot = parse_pr_view_json(run_json("gh", &pr_view_args(opts), "gh pr view")?)?;
-        let reviews = fetch_review_data(&snapshot, &opts.bots)?;
+        let mut snapshot = parse_pr_view_json(run_json_deadline(
+            "gh",
+            &pr_view_args(opts),
+            "gh pr view",
+            opts.deadline,
+        )?)?;
+        let reviews = fetch_review_data(&snapshot, &opts.bots, opts.deadline)?;
         snapshot.bot_reviews = reviews.bot_reviews;
         snapshot.findings = if opts.nitpicks {
             reviews
@@ -304,8 +310,17 @@ fn review_args(snapshot: &PrSnapshot, cursor: Option<&str>) -> Vec<String> {
     args
 }
 
-fn fetch_review_data(snapshot: &PrSnapshot, bots: &[String]) -> Result<ReviewData, CliError> {
-    let mut first = run_json("gh", &review_args(snapshot, None), "gh api graphql")?;
+fn fetch_review_data(
+    snapshot: &PrSnapshot,
+    bots: &[String],
+    deadline: Option<std::time::Instant>,
+) -> Result<ReviewData, CliError> {
+    let mut first = run_json_deadline(
+        "gh",
+        &review_args(snapshot, None),
+        "gh api graphql",
+        deadline,
+    )?;
     loop {
         let page_info = &first["data"]["repository"]["pullRequest"]["reviewThreads"]["pageInfo"];
         if !page_info["hasNextPage"].as_bool().unwrap_or(false) {
@@ -314,7 +329,12 @@ fn fetch_review_data(snapshot: &PrSnapshot, bots: &[String]) -> Result<ReviewDat
         let cursor = page_info["endCursor"]
             .as_str()
             .ok_or_else(|| pagination_failure("gh api graphql pagination"))?;
-        let next = run_json("gh", &review_args(snapshot, Some(cursor)), "gh api graphql")?;
+        let next = run_json_deadline(
+            "gh",
+            &review_args(snapshot, Some(cursor)),
+            "gh api graphql",
+            deadline,
+        )?;
         append_review_threads(&mut first, &next);
     }
     Ok(parse_review_data_for_head(

@@ -1,0 +1,7 @@
+{
+  "repository": { "id": 1016, "full_name": "multi-check-suites/repo" },
+  "check_suite": {
+    "pull_requests": [{ "number": 7 }, { "number": 8 }],
+    "head_sha": "multi-check-head"
+  }
+}

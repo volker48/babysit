@@ -1,0 +1,25 @@
+{
+  "name": "@babysit/gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "oxlint .",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.smoke.json",
+    "test": "vitest run",
+    "smoke": "tsx scripts/smoke.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.18.3",
+    "@cloudflare/workers-types": "5.20260708.1",
+    "@types/node": "22.15.17",
+    "oxfmt": "0.58.0",
+    "oxlint": "1.73.0",
+    "tsx": "4.21.0",
+    "typescript": "5.8.3",
+    "vitest": "4.1.10",
+    "wrangler": "4.109.0"
+  }
+}

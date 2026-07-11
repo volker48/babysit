@@ -45,6 +45,39 @@ test:
   script:
     - cargo test --locked --all
 
+.default_gateway_job:
+  image: node:24-bookworm-slim@sha256:cb4e8f7c443347358b7875e717c29e27bf9befc8f5a26cf18af3c3dec80e58c5
+  interruptible: true
+  before_script:
+    - corepack enable
+    - pnpm config set minimumReleaseAge 1440
+    - pnpm config set ignore-scripts true
+    - pnpm install --frozen-lockfile --ignore-scripts
+
+gateway_lint:
+  extends: .default_gateway_job
+  stage: verify
+  script:
+    - pnpm --filter @babysit/gateway lint
+
+gateway_format:
+  extends: .default_gateway_job
+  stage: verify
+  script:
+    - pnpm --filter @babysit/gateway format:check
+
+gateway_typecheck:
+  extends: .default_gateway_job
+  stage: verify
+  script:
+    - pnpm --filter @babysit/gateway typecheck
+
+gateway_test:
+  extends: .default_gateway_job
+  stage: verify
+  script:
+    - pnpm --filter @babysit/gateway test
+
 release:
   extends: .default_rust_job
   stage: build

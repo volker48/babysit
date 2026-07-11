@@ -1,0 +1,7 @@
+{
+  "repository": { "id": 1002, "full_name": "check-suites/repo" },
+  "check_suite": {
+    "pull_requests": [],
+    "head_sha": "check-suite-head"
+  }
+}

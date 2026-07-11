@@ -7,6 +7,67 @@ fn args(values: &[&str]) -> Vec<String> {
 }
 
 #[test]
+fn event_wait_defaults_to_a_300_second_fallback_and_requires_a_gateway_url() {
+    let parsed = parse_args(&args(&[
+        "wait",
+        "--events",
+        "--gateway-url",
+        "wss://gateway.example",
+    ]))
+    .unwrap();
+    assert!(parsed.events);
+    assert_eq!(parsed.gateway_url.as_deref(), Some("wss://gateway.example"));
+    assert_eq!(parsed.interval_secs, 300);
+
+    let explicit = parse_args(&args(&[
+        "wait",
+        "--events",
+        "--gateway-url=wss://gateway.example",
+        "--interval=5",
+    ]))
+    .unwrap();
+    assert_eq!(explicit.interval_secs, 5);
+    assert!(parse_args(&args(&["wait", "--events"])).is_err());
+    assert!(parse_args(&args(&["wait", "--gateway-url", "wss://gateway.example"])).is_err());
+    assert!(
+        parse_args(&args(&[
+            "status",
+            "--events",
+            "--gateway-url",
+            "wss://gateway.example"
+        ]))
+        .is_err()
+    );
+}
+
+#[test]
+fn rejects_gitlab_event_mode_before_fetching() {
+    assert_eq!(
+        babysit::cli::run(&args(&[
+            "wait",
+            "--forge",
+            "gitlab",
+            "--events",
+            "--gateway-url",
+            "wss://gateway.example",
+        ])),
+        4
+    );
+}
+
+#[test]
+fn parses_gateway_token_actions() {
+    let parsed = parse_args(&args(&["gateway-token", "enroll"])).unwrap();
+    assert_eq!(parsed.command, CommandName::GatewayToken);
+    assert_eq!(
+        parsed.gateway_token_action,
+        Some(babysit::cli::GatewayTokenAction::Enroll)
+    );
+    assert!(parse_args(&args(&["gateway-token"])).is_err());
+    assert!(parse_args(&args(&["gateway-token", "unknown"])).is_err());
+}
+
+#[test]
 fn parses_status_defaults() {
     let parsed = parse_args(&args(&["status"])).unwrap();
     assert_eq!(parsed.command, CommandName::Status);

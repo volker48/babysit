@@ -10,6 +10,9 @@
 - `/src/github.rs` implements `ForgeProvider` for GitHub through `gh`.
 - `/src/gitlab.rs` implements `ForgeProvider` for GitLab through `glab`.
 - `/src/bots.rs` maps bot logins to adapters and distills noisy bot Markdown into compact findings.
+- `/src/wait.rs` owns the bounded authoritative-fetch loop and its `WakeSource` seam.
+- `/src/event.rs` implements the opt-in GitHub WebSocket wake client; `/src/credentials.rs` owns
+  its macOS Keychain token boundary.
 
 ## CLI execution flow
 
@@ -25,7 +28,24 @@
 
 - `status` fetches once, prints status, and returns the status exit code.
 - `findings` fetches once, prints selected findings, and returns `0` if fetching/parsing succeeded.
-- `wait` loops until settled or timed out. Retryable forge CLI failures are ignored until the deadline; non-retryable errors stop the command. The loop sleeps for the configured interval, capped by remaining timeout.
+- `wait` loops until settled or timed out. Retryable forge CLI failures are ignored until the
+  deadline; non-retryable errors stop the command. The loop sleeps for the configured interval,
+  capped by remaining timeout.
+- `wait --events --gateway-url <wss-url>` retains that same loop but uses an event wake source.
+  Event mode is GitHub-only and falls back every 300 seconds unless `--interval` is explicit. The
+  manual deployment and operational boundary is documented in [Gateway operations](../operations/gateway.md).
+
+## Event wake invariant
+
+The gateway protocol is versioned JSON (`version: 1`) over an authenticated WebSocket opening
+handshake. The client sends a `register` with forge, host, repository, PR number, head OID, and
+last-seen cursor. It requires `ready(cursor)`, immediately fetches a new authoritative snapshot,
+and ignores `wake` and `replay` notifications at or below that ready cursor. A `resync` always
+requests a fresh snapshot, including when its cursor equals `ready`; later `wake` and `replay`
+notifications also request a fetch. Their data is never used to decide settlement. A changed head
+OID replaces the registration and repeats the ready/fetch ordering. Transient transport,
+429, and 5xx failures use bounded reconnect delay while polling continues; malformed protocol and
+401/403 failures stop with a configuration error.
 
 ## Settle logic
 
