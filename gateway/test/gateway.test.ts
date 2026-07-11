@@ -1,7 +1,7 @@
 import { env, exports } from "cloudflare:workers";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { createHmac } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { fetch as workerFetch } from "../src/worker";
 import checkRunFixture from "./fixtures/github-check-run.json";
 import checkRunMultiplePrsFixture from "./fixtures/github-check-run-multiple-prs.json";
@@ -64,19 +64,33 @@ async function watcher(repository: string, token = "watcher-test-token"): Promis
 }
 
 function nextMessage(socket: WebSocket): Promise<Record<string, unknown>> {
-  return new Promise((resolve) => {
-    socket.addEventListener("message", ({ data }) => resolve(JSON.parse(String(data))), {
-      once: true,
-    });
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      socket.removeEventListener("message", onMessage);
+      reject(new Error("timed out waiting for WebSocket message"));
+    }, 5_000);
+    const onMessage = ({ data }: MessageEvent) => {
+      clearTimeout(timeout);
+      socket.removeEventListener("message", onMessage);
+      resolve(JSON.parse(String(data)));
+    };
+    socket.addEventListener("message", onMessage);
   });
 }
 
 async function expectNoMessage(socket: WebSocket): Promise<void> {
-  const result = await Promise.race([
-    nextMessage(socket).then(() => "message"),
-    new Promise((resolve) => setTimeout(resolve, 25, "quiet")),
-  ]);
-  expect(result).toBe("quiet");
+  await new Promise<void>((resolve, reject) => {
+    const onMessage = () => {
+      clearTimeout(timeout);
+      socket.removeEventListener("message", onMessage);
+      reject(new Error("received an unexpected WebSocket message"));
+    };
+    const timeout = setTimeout(() => {
+      socket.removeEventListener("message", onMessage);
+      resolve();
+    }, 100);
+    socket.addEventListener("message", onMessage);
+  });
 }
 
 function register(
@@ -172,6 +186,57 @@ describe("GitHub status gateway", () => {
     ).toBe(202);
     expect(await firstWake).toMatchObject({ type: "wake", version: 1, cursor: 1 });
     expect(await secondWake).toMatchObject({ type: "wake", version: 1, cursor: 1 });
+    first.close();
+    second.close();
+  });
+
+  it("continues broadcasting when one matching watcher rejects a frame", async () => {
+    const repository = "send-failure/repo";
+    const first = await watcher(repository);
+    const second = await watcher(repository);
+    const firstReady = nextMessage(first);
+    const secondReady = nextMessage(second);
+    register(first, repository, "first-head", null, 51);
+    register(second, repository, "second-head", null, 52);
+    await firstReady;
+    await secondReady;
+
+    const stub = env.REPOSITORY_GATEWAY.get(env.REPOSITORY_GATEWAY.idFromName(repository));
+    const secondWake = nextMessage(second);
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await runInDurableObject(stub, async (instance, state) => {
+      const failingSocket = state
+        .getWebSockets()
+        .find(
+          (socket) =>
+            socket.deserializeAttachment<{ headRevision?: string }>().headRevision === "first-head",
+        );
+      if (!failingSocket) throw new Error("expected first watcher");
+      Object.defineProperty(failingSocket, "send", {
+        value: () => {
+          throw new Error("closed watcher");
+        },
+      });
+      const response = await instance.fetch(
+        new Request("https://repository-gateway/wake", {
+          method: "POST",
+          body: JSON.stringify({
+            deliveryId: "send-failure",
+            kind: "check_run",
+            repository: { id: "1014", fullName: repository },
+            receivedAt: Date.now(),
+          }),
+        }),
+      );
+      expect(response.status).toBe(202);
+      expect(state.storage.sql.exec("SELECT cursor FROM wake_outbox").toArray()).toEqual([
+        { cursor: 1 },
+      ]);
+    });
+
+    expect(await secondWake).toMatchObject({ type: "wake", cursor: 1 });
+    expect(warning).toHaveBeenCalledOnce();
+    warning.mockRestore();
     first.close();
     second.close();
   });

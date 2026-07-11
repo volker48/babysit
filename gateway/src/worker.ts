@@ -101,9 +101,17 @@ export class RepositoryGateway extends DurableObject<Env> {
       wake,
       watchers.map(({ registration }) => registration),
     );
+    let failed = false;
     for (const { socket, registration } of watchers) {
-      if (matchesWake(wake, registration, route)) socket.send(frame("wake", cursor));
+      if (!matchesWake(wake, registration, route)) continue;
+      try {
+        socket.send(frame("wake", cursor));
+      } catch {
+        failed = true;
+        console.warn("failed to deliver wake to watcher");
+      }
     }
+    if (failed) throw new Error("wake delivery failed for one or more watchers");
   }
 }
 
@@ -130,13 +138,9 @@ async function receiveWebhook(request: Request, env: Env): Promise<Response> {
   });
 }
 
-function connectWatcher(
-  request: Request,
-  env: Env,
-  repository: string,
-): Promise<Response> | Response {
+async function connectWatcher(request: Request, env: Env, repository: string): Promise<Response> {
   if (!isConfiguredSecret(env.WATCHER_TOKEN)) return unavailable();
-  if (request.headers.get("Authorization") !== `Bearer ${env.WATCHER_TOKEN}`) {
+  if (!(await hasValidWatcherToken(request.headers.get("Authorization"), env.WATCHER_TOKEN))) {
     return new Response("unauthorized", { status: 401 });
   }
   if (request.headers.get("Upgrade") !== "websocket") {
@@ -151,6 +155,20 @@ function connectWatcher(
 
 function unavailable(): Response {
   return new Response("gateway unavailable", { status: 503 });
+}
+
+async function hasValidWatcherToken(provided: string | null, expected: string): Promise<boolean> {
+  const values = [`Bearer ${expected}`, provided ?? ""];
+  const [expectedHash, providedHash] = await Promise.all(
+    values.map((value) => crypto.subtle.digest("SHA-256", encoder.encode(value))),
+  );
+  const expectedBytes = new Uint8Array(expectedHash);
+  const providedBytes = new Uint8Array(providedHash);
+  let difference = 0;
+  for (let index = 0; index < expectedBytes.length; index += 1) {
+    difference |= expectedBytes[index] ^ providedBytes[index];
+  }
+  return difference === 0;
 }
 
 function isConfiguredSecret(value: unknown): value is string {
