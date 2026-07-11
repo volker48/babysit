@@ -274,6 +274,22 @@ fn bugbot_extracts_title_severity_detail_and_actionable_count() {
 }
 
 #[test]
+fn bot_distillers_accept_crlf_comment_bodies() {
+    for (login, fixture_name) in [
+        ("coderabbitai[bot]", "coderabbit-inline-comment.md"),
+        ("chatgpt-codex-connector[bot]", "codex-inline-comment.md"),
+        ("cursor[bot]", "bugbot-inline-comment.md"),
+    ] {
+        let lf = fixture(fixture_name)
+            .replace("\r\n", "\n")
+            .replace('\r', "\n");
+        let crlf = lf.replace('\n', "\r\n");
+
+        assert_eq!(distill_comment(login, &crlf), distill_comment(login, &lf));
+    }
+}
+
+#[test]
 fn parse_nitpicks_parses_real_review_body() {
     let nitpicks = parse_nitpicks(&fixture("coderabbit-review-body.md"), "coderabbit");
     assert_eq!(nitpicks.len(), 2);
