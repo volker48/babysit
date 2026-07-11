@@ -32,7 +32,7 @@ try {
   await waitForExactFetches(counter, 3, child);
   console.log("verified CLI initial, ready, and wake authoritative gh pr view fetches");
 } finally {
-  child?.kill("SIGTERM");
+  await stopChild(child);
   await rm(tempDir, { force: true, recursive: true });
 }
 
@@ -167,6 +167,13 @@ async function startCli(
       stdio: "inherit",
     },
   );
+}
+
+async function stopChild(child: ReturnType<typeof spawn> | undefined): Promise<void> {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+  child.kill("SIGTERM");
+  await closed;
 }
 
 function ghShim(): string {

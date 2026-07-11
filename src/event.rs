@@ -141,7 +141,6 @@ pub struct EventWakeSource {
     watch: Option<WatchRegistration>,
     ready_cursor: Option<u64>,
     last_seen: Option<u64>,
-    pending_refetch: bool,
     retry_delay: Duration,
     runtime: Box<dyn EventRuntime>,
 }
@@ -177,7 +176,6 @@ impl EventWakeSource {
             watch: None,
             ready_cursor: None,
             last_seen: None,
-            pending_refetch: false,
             retry_delay: Duration::from_secs(1),
             runtime,
         })
@@ -281,10 +279,7 @@ impl EventWakeSource {
             .expect("socket was checked")
             .read_text(remaining);
         match result {
-            Ok(Some(message)) => {
-                self.handle_message(&message)?;
-                Ok(self.pending_refetch)
-            }
+            Ok(Some(message)) => self.handle_message(&message),
             Ok(None) => {
                 self.socket = None;
                 self.sleep_until(deadline);
@@ -298,17 +293,14 @@ impl EventWakeSource {
         }
     }
 
-    fn handle_message(&mut self, message: &str) -> Result<(), CliError> {
+    fn handle_message(&mut self, message: &str) -> Result<bool, CliError> {
         let (kind, cursor) = parse_notification(message)?;
         let Some(ready_cursor) = self.ready_cursor else {
             return Err(protocol_error());
         };
         self.last_seen = Some(self.last_seen.unwrap_or(ready_cursor).max(cursor));
-        if kind == "resync" || (cursor > ready_cursor && matches!(kind.as_str(), "wake" | "replay"))
-        {
-            self.pending_refetch = true;
-        }
-        Ok(())
+        Ok(kind == "resync"
+            || (cursor > ready_cursor && matches!(kind.as_str(), "wake" | "replay")))
     }
 }
 
@@ -337,7 +329,6 @@ impl WakeSource for EventWakeSource {
                 self.wait_for_socket(deadline)?
             };
             if woke {
-                self.pending_refetch = false;
                 return Ok(());
             }
         }
@@ -358,10 +349,6 @@ impl WakeSource for EventWakeSource {
             } else {
                 SnapshotAction::Wait
             });
-        }
-        if self.pending_refetch {
-            self.pending_refetch = false;
-            return Ok(SnapshotAction::RefetchNow);
         }
         Ok(SnapshotAction::Wait)
     }
