@@ -508,7 +508,8 @@ pub fn usage() -> String {
     [
         "Usage: babysit status|findings|wait [<pr>] [options]",
         "       babysit gateway-token <enroll|status|delete|rotate>",
-        "       babysit --help | --version",
+        "       babysit --help",
+        "       babysit --version",
         "Options:",
         "  -R, --repo <owner/repo>",
         "  --forge <github|gitlab>  default: auto (origin host containing gitlab => gitlab)",

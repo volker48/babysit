@@ -8,8 +8,7 @@ use crate::core::{
     BotReview, CheckState, PrCheck, PrSnapshot, ReviewData, ReviewThread, findings_from_threads,
 };
 use crate::forge::{
-    CliError, ForgeProvider, SnapshotFetchOptions, pagination_failure, parse_json_failure,
-    run_json_deadline,
+    CliError, ForgeProvider, SnapshotFetchOptions, parse_json_failure, run_json_deadline,
 };
 
 const MAX_REVIEW_PAGES: usize = 100;
@@ -348,13 +347,11 @@ where
     let mut pages = 1;
     let mut seen_cursors = HashSet::new();
     loop {
-        let page_info = &first["data"]["repository"]["pullRequest"]["reviewThreads"]["pageInfo"];
-        if !page_info["hasNextPage"].as_bool().unwrap_or(false) {
+        let (has_next_page, cursor) = review_page_info(&first)?;
+        if !has_next_page {
             return Ok(first);
         }
-        let cursor = page_info["endCursor"]
-            .as_str()
-            .ok_or_else(|| pagination_failure("gh api graphql pagination"))?;
+        let cursor = cursor.expect("advancing review page has a cursor");
         if !seen_cursors.insert(cursor.to_string()) {
             return Err(parse_json_failure(
                 "gh api graphql pagination",
@@ -368,17 +365,49 @@ where
             ));
         }
         let next = fetch_page(cursor)?;
+        review_page_info(&next)?;
         append_review_threads(&mut first, &next);
         pages += 1;
     }
 }
 
-fn append_review_threads(first: &mut Value, next: &Value) {
-    let dst = first["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"].as_array_mut();
-    let src = next["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"].as_array();
-    if let (Some(dst), Some(src)) = (dst, src) {
-        dst.extend(src.iter().cloned());
+fn review_page_info(page: &Value) -> Result<(bool, Option<&str>), CliError> {
+    let threads = page
+        .pointer("/data/repository/pullRequest/reviewThreads")
+        .ok_or_else(|| pagination_shape_error("reviewThreads.nodes"))?;
+    threads
+        .get("nodes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| pagination_shape_error("reviewThreads.nodes"))?;
+    let page_info = threads
+        .get("pageInfo")
+        .ok_or_else(|| pagination_shape_error("reviewThreads.pageInfo"))?;
+    let has_next_page = page_info
+        .get("hasNextPage")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| pagination_shape_error("reviewThreads.pageInfo.hasNextPage"))?;
+    let cursor = page_info.get("endCursor").and_then(Value::as_str);
+    if has_next_page && cursor.is_none_or(str::is_empty) {
+        return Err(pagination_shape_error("reviewThreads.pageInfo.endCursor"));
     }
+    Ok((has_next_page, cursor))
+}
+
+fn pagination_shape_error(field: &str) -> CliError {
+    parse_json_failure(
+        "gh api graphql pagination",
+        format!("missing or invalid {field}"),
+    )
+}
+
+fn append_review_threads(first: &mut Value, next: &Value) {
+    let dst = first["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+        .as_array_mut()
+        .expect("review page was validated");
+    let src = next["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+        .as_array()
+        .expect("review page was validated");
+    dst.extend(src.iter().cloned());
     first["data"]["repository"]["pullRequest"]["reviewThreads"]["pageInfo"] =
         next["data"]["repository"]["pullRequest"]["reviewThreads"]["pageInfo"].clone();
 }
@@ -438,6 +467,17 @@ mod tests {
             .as_array()
             .unwrap();
         assert_eq!(nodes.len(), 2);
+    }
+
+    #[test]
+    fn review_thread_pagination_rejects_malformed_pages() {
+        let initial_error =
+            collect_review_pages(json!({"bad": true}), |_| unreachable!()).unwrap_err();
+        assert!(initial_error.to_string().contains("reviewThreads.nodes"));
+
+        let first = review_page("next", true);
+        let next_error = collect_review_pages(first, |_| Ok(json!({"bad": true}))).unwrap_err();
+        assert!(next_error.to_string().contains("reviewThreads.nodes"));
     }
 
     #[test]

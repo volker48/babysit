@@ -38,7 +38,8 @@ npx skills add volker48/babysit
 ```bash
 babysit status|findings|wait [<pr-or-mr-number>] [options]
 babysit gateway-token <enroll|status|delete|rotate>
-babysit --help | --version
+babysit --help
+babysit --version
 ```
 
 Options:

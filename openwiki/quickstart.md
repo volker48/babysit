@@ -21,7 +21,8 @@ From `/README.md` and `/src/cli.rs`:
 
 ```bash
 babysit status|findings|wait [<pr-or-mr-number>] [options]
-babysit --help | --version
+babysit --help
+babysit --version
 ```
 
 Important options:
