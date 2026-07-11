@@ -76,6 +76,40 @@ describe("durable wake delivery", () => {
     });
   });
 
+  it("resyncs #9 wake rows that predate repository IDs", async () => {
+    const repository = "schema-migration-without-repository-id";
+    await withHistory(repository, (_, state) => {
+      state.storage.sql.exec("DROP TABLE wake_events");
+      state.storage.sql.exec(
+        "CREATE TABLE wake_events (cursor INTEGER PRIMARY KEY, received_at_ms INTEGER NOT NULL, " +
+          "kind TEXT NOT NULL, head_oid TEXT, pr_number INTEGER, delivery_id TEXT, " +
+          "repository_full_name TEXT)",
+      );
+      state.storage.sql.exec(
+        "INSERT INTO wake_events VALUES (?, ?, ?, ?, ?, ?, ?)",
+        1,
+        base,
+        "status",
+        "head",
+        null,
+        "legacy-delivery-without-id",
+        "owner/repository",
+      );
+      state.storage.sql.exec(
+        "UPDATE broker_state SET current_cursor = 1, intents_initialized = 0 WHERE id = 1",
+      );
+    });
+    await evictDurableObject(stub(repository));
+    await withHistory(repository, (history, state) => {
+      expect(history.resume(0, { headRevision: "head" }, base)).toEqual({
+        cursor: 1,
+        replay: [],
+        resync: true,
+      });
+      expect(tableColumns(state, "wake_events")).not.toContain("repository_full_name");
+    });
+  });
+
   it("migrates intermediate outbox rows without repository names", async () => {
     const repository = "outbox-schema-migration";
     await withHistory(repository, (_, state) => {

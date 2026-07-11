@@ -166,7 +166,9 @@ export class WakeHistory {
   private migrateWakeSchema(): void {
     const columns = this.tableColumns("wake_events");
     if (columns.includes("repository_full_name")) {
-      this.storage.transactionSync(() => this.dropLegacyRepositoryName());
+      this.storage.transactionSync(() =>
+        this.dropLegacyRepositoryName(columns.includes("repository_id")),
+      );
       return;
     }
     if (!columns.includes("repository_id")) {
@@ -174,12 +176,13 @@ export class WakeHistory {
     }
   }
 
-  private dropLegacyRepositoryName(): void {
+  private dropLegacyRepositoryName(hasRepositoryId: boolean): void {
     this.storage.sql.exec("ALTER TABLE wake_events RENAME TO wake_events_legacy");
     this.createTables();
+    const repositoryId = hasRepositoryId ? "repository_id" : "NULL";
     this.storage.sql.exec(
       "INSERT INTO wake_events (cursor, received_at_ms, kind, head_oid, pr_number, delivery_id, repository_id) " +
-        "SELECT cursor, received_at_ms, kind, head_oid, pr_number, delivery_id, repository_id " +
+        `SELECT cursor, received_at_ms, kind, head_oid, pr_number, delivery_id, ${repositoryId} ` +
         "FROM wake_events_legacy",
     );
     this.storage.sql.exec("DROP TABLE wake_events_legacy");
