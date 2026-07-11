@@ -146,12 +146,17 @@ fn gitlab_discussion(path: &str, line: u64, title: &str) -> Value {
 
 #[test]
 fn review_query_paginates_review_threads() {
+    let compact_query = REVIEW_QUERY
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     assert!(REVIEW_QUERY.contains("$reviewsCursor: String"));
     assert!(REVIEW_QUERY.contains("reviews(first: 100, after: $reviewsCursor)"));
+    assert!(compact_query.contains(
+        "reviews(first: 100, after: $reviewsCursor) { pageInfo { hasNextPage endCursor }"
+    ));
     assert!(REVIEW_QUERY.contains("$reviewThreadsCursor: String"));
     assert!(REVIEW_QUERY.contains("reviewThreads(first: 100, after: $reviewThreadsCursor)"));
-    assert!(REVIEW_QUERY.contains("hasNextPage"));
-    assert!(REVIEW_QUERY.contains("endCursor"));
 }
 
 #[test]
