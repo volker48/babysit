@@ -11,6 +11,8 @@ The canonical user-facing README is `/README.md`; this OpenWiki adds a change-or
 - Binary entrypoint: `/src/main.rs` forwards process arguments to `babysit::cli::run`.
 - Public modules: `/src/lib.rs` exposes `bots`, `cli`, `core`, `forge`, `github`, and `gitlab`.
 - External integrations: GitHub uses the authenticated `gh` CLI; GitLab uses the authenticated `glab` CLI.
+- Companion agent skill: `/skills/babysit/SKILL.md` is the canonical skill source. Repo-local
+  `.claude/skills/babysit` and `.codex/skills/babysit` entries are discovery wrappers.
 - CI: `/.gitlab-ci.yml` runs formatting, clippy, tests, and a release build.
 
 Recent git history shows the current code is a compact extracted Rust CLI (`652b9bb Extract babysit CLI`) with follow-up fixes for CodeRabbit/GitLab review handling (`a1c1fa7`, `4204db2`).

@@ -26,12 +26,17 @@ cargo build --release
 
 ## Add the companion skill
 
-I would add this globally so its available in all your repos. Feel free to adapt the skill to
-how you want to work.
+The canonical skill source lives in `skills/babysit/SKILL.md`, matching the top-level skill layout
+used by the open agent skills ecosystem. I would add this globally so it is available in all your
+repos. Feel free to adapt the skill to how you want to work.
 
 ```bash
 npx skills add volker48/babysit
 ```
+
+This repository also keeps thin `.claude/skills/babysit` and `.codex/skills/babysit` discovery
+wrappers for local agent sessions. The Rust test suite checks that their trigger metadata stays in
+sync with the canonical skill.
 
 ## Usage
 
