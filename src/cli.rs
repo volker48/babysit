@@ -506,7 +506,9 @@ fn fetch_snapshot_for(
 
 pub fn usage() -> String {
     [
-        "Usage: babysit status|findings|wait [<pr>] [options]",
+        "Usage: babysit status [<pr>] [options]",
+        "       babysit findings [<pr>] [options]",
+        "       babysit wait [<pr>] [options]",
         "       babysit gateway-token <enroll|status|delete|rotate>",
         "       babysit --help",
         "       babysit --version",

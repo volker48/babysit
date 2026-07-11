@@ -9,7 +9,10 @@ use babysit::core::{
     unresolved_findings,
 };
 use babysit::forge::{collect_json_pages, run_json_deadline, run_json_pages};
-use babysit::github::{REVIEW_QUERY, parse_pr_view, parse_review_data, parse_review_data_for_head};
+use babysit::github::{
+    REVIEW_QUERY, collect_review_pages, parse_pr_view, parse_review_data,
+    parse_review_data_for_head,
+};
 use babysit::gitlab::{
     parse_gitlab_bot_reviews, parse_gitlab_findings, parse_gitlab_findings_for_head,
     parse_gitlab_jobs, parse_gitlab_mr,
@@ -383,6 +386,61 @@ fn review_graphql() -> Value {
         {"isResolved":true,"isOutdated":false,"path":"pi-extensions/claude-review/claude-bg.ts","line":410,"startLine":null,"comments":{"nodes":[{"author":{"login":"chatgpt-codex-connector"},"body":fixture("codex-inline-comment.md")}]}},
         {"isResolved":false,"isOutdated":false,"path":"README.md","line":1,"startLine":null,"comments":{"nodes":[{"author":{"login":"volker48"},"body":"human comment"}]}}
     ],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}})
+}
+
+#[test]
+fn collect_review_pages_rejects_malformed_initial_page() {
+    let mut missing_page_info = review_graphql();
+    missing_page_info["data"]["repository"]["pullRequest"]["reviewThreads"]
+        .as_object_mut()
+        .unwrap()
+        .remove("pageInfo");
+    let error = collect_review_pages(missing_page_info, |_| unreachable!()).unwrap_err();
+    assert!(error.to_string().contains("reviewThreads.pageInfo"));
+
+    let mut missing_has_next = review_graphql();
+    missing_has_next["data"]["repository"]["pullRequest"]["reviewThreads"]["pageInfo"]
+        .as_object_mut()
+        .unwrap()
+        .remove("hasNextPage");
+    let error = collect_review_pages(missing_has_next, |_| unreachable!()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("reviewThreads.pageInfo.hasNextPage")
+    );
+
+    let mut missing_cursor = review_graphql();
+    missing_cursor["data"]["repository"]["pullRequest"]["reviewThreads"]["pageInfo"] =
+        json!({"hasNextPage":true,"endCursor":null});
+    let error = collect_review_pages(missing_cursor, |_| unreachable!()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("reviewThreads.pageInfo.endCursor")
+    );
+}
+
+#[test]
+fn collect_review_pages_rejects_malformed_subsequent_page() {
+    let mut first = review_graphql();
+    first["data"]["repository"]["pullRequest"]["reviewThreads"]["pageInfo"] =
+        json!({"hasNextPage":true,"endCursor":"cursor-1"});
+    let mut second = review_graphql();
+    second["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["isResolved"] =
+        json!("false");
+
+    let error = collect_review_pages(first, |cursor| {
+        assert_eq!(cursor, "cursor-1");
+        Ok(second.clone())
+    })
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("reviewThreads.nodes[0].isResolved")
+    );
 }
 
 #[test]

@@ -20,7 +20,9 @@ Recent git history shows the current code is a compact extracted Rust CLI (`652b
 From `/README.md` and `/src/cli.rs`:
 
 ```bash
-babysit status|findings|wait [<pr-or-mr-number>] [options]
+babysit status [<pr-or-mr-number>] [options]
+babysit findings [<pr-or-mr-number>] [options]
+babysit wait [<pr-or-mr-number>] [options]
 babysit --help
 babysit --version
 ```

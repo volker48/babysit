@@ -36,7 +36,9 @@ npx skills add volker48/babysit
 ## Usage
 
 ```bash
-babysit status|findings|wait [<pr-or-mr-number>] [options]
+babysit status [<pr-or-mr-number>] [options]
+babysit findings [<pr-or-mr-number>] [options]
+babysit wait [<pr-or-mr-number>] [options]
 babysit gateway-token <enroll|status|delete|rotate>
 babysit --help
 babysit --version

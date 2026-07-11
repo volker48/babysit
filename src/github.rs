@@ -340,10 +340,12 @@ fn fetch_review_data(
     ))
 }
 
-fn collect_review_pages<F>(mut first: Value, mut fetch_page: F) -> Result<Value, CliError>
+/// Validates and combines paged GitHub review-thread GraphQL responses.
+pub fn collect_review_pages<F>(mut first: Value, mut fetch_page: F) -> Result<Value, CliError>
 where
     F: FnMut(&str) -> Result<Value, CliError>,
 {
+    validate_review_response(&first, true)?;
     let mut pages = 1;
     let mut seen_cursors = HashSet::new();
     loop {
@@ -365,39 +367,23 @@ where
             ));
         }
         let next = fetch_page(cursor)?;
-        review_page_info(&next)?;
+        validate_review_response(&next, false)?;
         append_review_threads(&mut first, &next);
         pages += 1;
     }
 }
 
 fn review_page_info(page: &Value) -> Result<(bool, Option<&str>), CliError> {
-    let threads = page
-        .pointer("/data/repository/pullRequest/reviewThreads")
-        .ok_or_else(|| pagination_shape_error("reviewThreads.nodes"))?;
-    threads
-        .get("nodes")
-        .and_then(Value::as_array)
-        .ok_or_else(|| pagination_shape_error("reviewThreads.nodes"))?;
-    let page_info = threads
-        .get("pageInfo")
-        .ok_or_else(|| pagination_shape_error("reviewThreads.pageInfo"))?;
+    let page_info = review_threads_page_info(page)?;
     let has_next_page = page_info
         .get("hasNextPage")
         .and_then(Value::as_bool)
-        .ok_or_else(|| pagination_shape_error("reviewThreads.pageInfo.hasNextPage"))?;
+        .ok_or_else(|| review_shape_error("reviewThreads.pageInfo.hasNextPage"))?;
     let cursor = page_info.get("endCursor").and_then(Value::as_str);
     if has_next_page && cursor.is_none_or(str::is_empty) {
-        return Err(pagination_shape_error("reviewThreads.pageInfo.endCursor"));
+        return Err(review_shape_error("reviewThreads.pageInfo.endCursor"));
     }
     Ok((has_next_page, cursor))
-}
-
-fn pagination_shape_error(field: &str) -> CliError {
-    parse_json_failure(
-        "gh api graphql pagination",
-        format!("missing or invalid {field}"),
-    )
 }
 
 fn append_review_threads(first: &mut Value, next: &Value) {
@@ -410,6 +396,109 @@ fn append_review_threads(first: &mut Value, next: &Value) {
     dst.extend(src.iter().cloned());
     first["data"]["repository"]["pullRequest"]["reviewThreads"]["pageInfo"] =
         next["data"]["repository"]["pullRequest"]["reviewThreads"]["pageInfo"].clone();
+}
+
+fn validate_review_response(raw: &Value, require_reviews: bool) -> Result<(), CliError> {
+    let pr = review_pull_request(raw)?;
+    if require_reviews {
+        require_array(&pr["reviews"]["nodes"], "reviews.nodes")?;
+    }
+    let threads = require_object(&pr["reviewThreads"], "reviewThreads")?;
+    require_page_info(&threads["pageInfo"])?;
+    let nodes = require_array(&threads["nodes"], "reviewThreads.nodes")?;
+    for (index, node) in nodes.iter().enumerate() {
+        validate_review_thread(node, index)?;
+    }
+    Ok(())
+}
+
+fn review_pull_request(raw: &Value) -> Result<&Value, CliError> {
+    let pr = &raw["data"]["repository"]["pullRequest"];
+    require_object(pr, "data.repository.pullRequest")
+}
+
+fn review_threads_page_info(raw: &Value) -> Result<&Value, CliError> {
+    let pr = review_pull_request(raw)?;
+    require_object(&pr["reviewThreads"]["pageInfo"], "reviewThreads.pageInfo")
+}
+
+fn require_page_info(page_info: &Value) -> Result<(), CliError> {
+    require_object(page_info, "reviewThreads.pageInfo")?;
+    let has_next = page_info["hasNextPage"]
+        .as_bool()
+        .ok_or_else(|| review_shape_error("reviewThreads.pageInfo.hasNextPage"))?;
+    match (has_next, page_info.get("endCursor")) {
+        (true, Some(Value::String(cursor))) if !cursor.is_empty() => Ok(()),
+        (false, Some(Value::String(_) | Value::Null)) => Ok(()),
+        _ => Err(review_shape_error("reviewThreads.pageInfo.endCursor")),
+    }
+}
+
+fn require_nullable_u64(value: Option<&Value>, field: &str) -> Result<(), CliError> {
+    match value {
+        Some(Value::Number(number)) if number.as_u64().is_some() => Ok(()),
+        Some(Value::Null) => Ok(()),
+        _ => Err(review_shape_error(field)),
+    }
+}
+
+fn validate_review_thread(thread: &Value, index: usize) -> Result<(), CliError> {
+    let context = format!("reviewThreads.nodes[{index}]");
+    require_object(thread, &context)?;
+    require_bool(&thread["isResolved"], &format!("{context}.isResolved"))?;
+    require_bool(&thread["isOutdated"], &format!("{context}.isOutdated"))?;
+    require_str(&thread["path"], &format!("{context}.path"))?;
+    require_nullable_u64(thread.get("line"), &format!("{context}.line"))?;
+    require_nullable_u64(thread.get("startLine"), &format!("{context}.startLine"))?;
+    let comments = require_array(
+        &thread["comments"]["nodes"],
+        &format!("{context}.comments.nodes"),
+    )?;
+    for (comment_index, comment) in comments.iter().enumerate() {
+        validate_review_comment(comment, &context, comment_index)?;
+    }
+    Ok(())
+}
+
+fn validate_review_comment(comment: &Value, context: &str, index: usize) -> Result<(), CliError> {
+    let context = format!("{context}.comments.nodes[{index}]");
+    require_object(comment, &context)?;
+    require_str(
+        &comment["author"]["login"],
+        &format!("{context}.author.login"),
+    )?;
+    require_str(&comment["body"], &format!("{context}.body"))?;
+    Ok(())
+}
+
+fn require_object<'a>(value: &'a Value, field: &str) -> Result<&'a Value, CliError> {
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err(review_shape_error(field))
+    }
+}
+
+fn require_array<'a>(value: &'a Value, field: &str) -> Result<&'a Vec<Value>, CliError> {
+    value.as_array().ok_or_else(|| review_shape_error(field))
+}
+
+fn require_bool(value: &Value, field: &str) -> Result<(), CliError> {
+    value
+        .as_bool()
+        .map(|_| ())
+        .ok_or_else(|| review_shape_error(field))
+}
+
+fn require_str(value: &Value, field: &str) -> Result<(), CliError> {
+    value
+        .as_str()
+        .map(|_| ())
+        .ok_or_else(|| review_shape_error(field))
+}
+
+fn review_shape_error(field: &str) -> CliError {
+    parse_json_failure("gh api graphql", format!("missing or invalid {field}"))
 }
 
 fn parse_pr_view_json(raw: Value) -> Result<PrSnapshot, CliError> {
@@ -450,15 +539,26 @@ mod tests {
         })
     }
 
+    fn review_thread(path: &str) -> Value {
+        json!({
+            "isResolved": false,
+            "isOutdated": false,
+            "path": path,
+            "line": 1,
+            "startLine": null,
+            "comments": {"nodes": [{"author": {"login": "coderabbitai"}, "body": "body"}]}
+        })
+    }
+
     #[test]
     fn review_thread_pagination_aggregates_finite_pages() {
         let mut first = review_page("next", true);
         first["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"] =
-            json!([{"path": "first"}]);
+            json!([review_thread("first")]);
         let pages = collect_review_pages(first, |_| {
             let mut next = review_page("done", false);
             next["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"] =
-                json!([{"path": "second"}]);
+                json!([review_thread("second")]);
             Ok(next)
         })
         .unwrap();
@@ -473,11 +573,19 @@ mod tests {
     fn review_thread_pagination_rejects_malformed_pages() {
         let initial_error =
             collect_review_pages(json!({"bad": true}), |_| unreachable!()).unwrap_err();
-        assert!(initial_error.to_string().contains("reviewThreads.nodes"));
+        assert!(
+            initial_error
+                .to_string()
+                .contains("data.repository.pullRequest")
+        );
 
         let first = review_page("next", true);
         let next_error = collect_review_pages(first, |_| Ok(json!({"bad": true}))).unwrap_err();
-        assert!(next_error.to_string().contains("reviewThreads.nodes"));
+        assert!(
+            next_error
+                .to_string()
+                .contains("data.repository.pullRequest")
+        );
     }
 
     #[test]
