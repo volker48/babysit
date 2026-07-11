@@ -146,10 +146,17 @@ fn gitlab_discussion(path: &str, line: u64, title: &str) -> Value {
 
 #[test]
 fn review_query_paginates_review_threads() {
+    let compact_query = REVIEW_QUERY
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(REVIEW_QUERY.contains("$reviewsCursor: String"));
+    assert!(REVIEW_QUERY.contains("reviews(first: 100, after: $reviewsCursor)"));
+    assert!(compact_query.contains(
+        "reviews(first: 100, after: $reviewsCursor) { pageInfo { hasNextPage endCursor }"
+    ));
     assert!(REVIEW_QUERY.contains("$reviewThreadsCursor: String"));
     assert!(REVIEW_QUERY.contains("reviewThreads(first: 100, after: $reviewThreadsCursor)"));
-    assert!(REVIEW_QUERY.contains("hasNextPage"));
-    assert!(REVIEW_QUERY.contains("endCursor"));
 }
 
 #[test]
@@ -397,7 +404,7 @@ fn review_graphql() -> Value {
     json!({"data":{"repository":{"pullRequest":{"reviews":{"nodes":[
         {"author":{"login":"coderabbitai"},"state":"COMMENTED","submittedAt":"2026-07-05T10:00:00Z","body":fixture("coderabbit-review-body.md"),"commit":{"oid":"abc123"}},
         {"author":{"login":"volker48"},"state":"APPROVED","submittedAt":"2026-07-05T11:00:00Z","body":"","commit":null}
-    ]},"reviewThreads":{"nodes":[
+    ],"pageInfo":{"hasNextPage":false,"endCursor":null}},"reviewThreads":{"nodes":[
         {"isResolved":false,"isOutdated":false,"path":"plugins/pi/scripts/lib/jobs.mjs","line":23,"startLine":16,"comments":{"nodes":[{"author":{"login":"coderabbitai"},"body":fixture("coderabbit-inline-comment.md")}]}},
         {"isResolved":true,"isOutdated":false,"path":"pi-extensions/claude-review/claude-bg.ts","line":410,"startLine":null,"comments":{"nodes":[{"author":{"login":"chatgpt-codex-connector"},"body":fixture("codex-inline-comment.md")}]}},
         {"isResolved":false,"isOutdated":false,"path":"README.md","line":1,"startLine":null,"comments":{"nodes":[{"author":{"login":"volker48"},"body":"human comment"}]}}
@@ -411,7 +418,7 @@ fn collect_review_pages_rejects_malformed_initial_page() {
         .as_object_mut()
         .unwrap()
         .remove("pageInfo");
-    let error = collect_review_pages(missing_page_info, |_| unreachable!()).unwrap_err();
+    let error = collect_review_pages(missing_page_info, |_, _| unreachable!()).unwrap_err();
     assert!(error.to_string().contains("reviewThreads.pageInfo"));
 
     let mut missing_has_next = review_graphql();
@@ -419,7 +426,7 @@ fn collect_review_pages_rejects_malformed_initial_page() {
         .as_object_mut()
         .unwrap()
         .remove("hasNextPage");
-    let error = collect_review_pages(missing_has_next, |_| unreachable!()).unwrap_err();
+    let error = collect_review_pages(missing_has_next, |_, _| unreachable!()).unwrap_err();
     assert!(
         error
             .to_string()
@@ -429,7 +436,7 @@ fn collect_review_pages_rejects_malformed_initial_page() {
     let mut missing_cursor = review_graphql();
     missing_cursor["data"]["repository"]["pullRequest"]["reviewThreads"]["pageInfo"] =
         json!({"hasNextPage":true,"endCursor":null});
-    let error = collect_review_pages(missing_cursor, |_| unreachable!()).unwrap_err();
+    let error = collect_review_pages(missing_cursor, |_, _| unreachable!()).unwrap_err();
     assert!(
         error
             .to_string()
@@ -446,8 +453,9 @@ fn collect_review_pages_rejects_malformed_subsequent_page() {
     second["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["isResolved"] =
         json!("false");
 
-    let error = collect_review_pages(first, |cursor| {
-        assert_eq!(cursor, "cursor-1");
+    let error = collect_review_pages(first, |reviews_cursor, review_threads_cursor| {
+        assert!(reviews_cursor.is_none());
+        assert_eq!(review_threads_cursor, Some("cursor-1"));
         Ok(second.clone())
     })
     .unwrap_err();
@@ -457,6 +465,42 @@ fn collect_review_pages_rejects_malformed_subsequent_page() {
             .to_string()
             .contains("reviewThreads.nodes[0].isResolved")
     );
+}
+
+#[test]
+fn collect_review_pages_keeps_bot_review_from_later_review_page() {
+    let mut first = review_graphql();
+    first["data"]["repository"]["pullRequest"]["reviews"]["nodes"] = json!([
+        {"author":{"login":"volker48"},"state":"APPROVED","submittedAt":"2026-07-06T12:10:00Z","body":"","commit":null}
+    ]);
+    first["data"]["repository"]["pullRequest"]["reviews"]["pageInfo"] =
+        json!({"hasNextPage":true,"endCursor":"reviews-1"});
+    first["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"] = json!([]);
+
+    let mut second = review_graphql();
+    second["data"]["repository"]["pullRequest"]["reviews"]["nodes"] = json!([
+        {"author":{"login":"coderabbitai"},"state":"COMMENTED","submittedAt":"2026-07-06T12:30:00Z","body":"**Actionable comments posted: 0**","commit":{"oid":"current-head"}}
+    ]);
+    second["data"]["repository"]["pullRequest"]["reviews"]["pageInfo"] =
+        json!({"hasNextPage":false,"endCursor":null});
+    second["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"] = json!([]);
+
+    let pages = collect_review_pages(first, |reviews_cursor, review_threads_cursor| {
+        assert_eq!(reviews_cursor, Some("reviews-1"));
+        assert!(review_threads_cursor.is_none());
+        Ok(second.clone())
+    })
+    .unwrap();
+    let data = parse_review_data_for_head(
+        &pages,
+        &["coderabbitai".to_string()],
+        "current-head",
+        Some("2026-07-06T12:00:00Z"),
+    );
+    let mut snapshot = base_settle_snapshot();
+    snapshot.bot_reviews = data.bot_reviews;
+
+    assert!(evaluate_settled(&snapshot, &SettleOptions::default()).settled);
 }
 
 #[test]

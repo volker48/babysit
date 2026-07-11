@@ -14,10 +14,20 @@ use crate::forge::{
 const MAX_REVIEW_PAGES: usize = 100;
 
 pub const REVIEW_QUERY: &str = r#"
-query($owner: String!, $name: String!, $number: Int!, $reviewThreadsCursor: String) {
+query(
+  $owner: String!,
+  $name: String!,
+  $number: Int!,
+  $reviewsCursor: String,
+  $reviewThreadsCursor: String
+) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
-      reviews(last: 50) {
+      reviews(first: 100, after: $reviewsCursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
         nodes {
           author { login }
           state
@@ -294,7 +304,11 @@ fn pr_view_fields() -> Vec<&'static str> {
     ]
 }
 
-fn review_args(snapshot: &PrSnapshot, cursor: Option<&str>) -> Vec<String> {
+fn review_args(
+    snapshot: &PrSnapshot,
+    reviews_cursor: Option<&str>,
+    review_threads_cursor: Option<&str>,
+) -> Vec<String> {
     let mut args = vec![
         "api".to_string(),
         "graphql".to_string(),
@@ -307,7 +321,10 @@ fn review_args(snapshot: &PrSnapshot, cursor: Option<&str>) -> Vec<String> {
         "-F".to_string(),
         format!("number={}", snapshot.number),
     ];
-    if let Some(cursor) = cursor {
+    if let Some(cursor) = reviews_cursor {
+        args.extend(["-F".to_string(), format!("reviewsCursor={cursor}")]);
+    }
+    if let Some(cursor) = review_threads_cursor {
         args.extend(["-F".to_string(), format!("reviewThreadsCursor={cursor}")]);
     }
     args
@@ -320,14 +337,14 @@ fn fetch_review_data(
 ) -> Result<ReviewData, CliError> {
     let first = run_json_deadline(
         "gh",
-        &review_args(snapshot, None),
+        &review_args(snapshot, None, None),
         "gh api graphql",
         deadline,
     )?;
-    let pages = collect_review_pages(first, |cursor| {
+    let pages = collect_review_pages(first, |reviews_cursor, review_threads_cursor| {
         run_json_deadline(
             "gh",
-            &review_args(snapshot, Some(cursor)),
+            &review_args(snapshot, reviews_cursor, review_threads_cursor),
             "gh api graphql",
             deadline,
         )
@@ -340,71 +357,141 @@ fn fetch_review_data(
     ))
 }
 
-/// Validates and combines paged GitHub review-thread GraphQL responses.
+/// Validates and combines paged GitHub review and review-thread GraphQL responses.
 pub fn collect_review_pages<F>(mut first: Value, mut fetch_page: F) -> Result<Value, CliError>
 where
-    F: FnMut(&str) -> Result<Value, CliError>,
+    F: FnMut(Option<&str>, Option<&str>) -> Result<Value, CliError>,
 {
-    validate_review_response(&first, true)?;
-    let mut pages = 1;
-    let mut seen_cursors = HashSet::new();
+    validate_review_response(&first, ReviewValidation::all())?;
+    let mut reviews_pages = 1;
+    let mut review_threads_pages = 1;
+    let mut seen_review_cursors = HashSet::new();
+    let mut seen_review_thread_cursors = HashSet::new();
     loop {
-        let (has_next_page, cursor) = review_page_info(&first)?;
-        if !has_next_page {
+        let reviews_cursor =
+            next_cursor(&first, "reviews", &mut seen_review_cursors, reviews_pages)?;
+        let review_threads_cursor = next_cursor(
+            &first,
+            "reviewThreads",
+            &mut seen_review_thread_cursors,
+            review_threads_pages,
+        )?;
+        if reviews_cursor.is_none() && review_threads_cursor.is_none() {
             return Ok(first);
         }
-        let cursor = cursor.expect("advancing review page has a cursor");
-        if !seen_cursors.insert(cursor.to_string()) {
-            return Err(parse_json_failure(
-                "gh api graphql pagination",
-                "cursor did not advance",
-            ));
-        }
-        if pages >= MAX_REVIEW_PAGES {
-            return Err(parse_json_failure(
-                "gh api graphql pagination",
-                format!("exceeded {MAX_REVIEW_PAGES} pages"),
-            ));
-        }
-        let next = fetch_page(cursor)?;
-        validate_review_response(&next, false)?;
-        append_review_threads(&mut first, &next);
-        pages += 1;
+        let next = fetch_page(reviews_cursor.as_deref(), review_threads_cursor.as_deref())?;
+        let validation = ReviewValidation {
+            reviews: reviews_cursor.is_some(),
+            review_threads: review_threads_cursor.is_some(),
+        };
+        validate_review_response(&next, validation)?;
+        append_review_connections(&mut first, &next, validation);
+        reviews_pages += usize::from(validation.reviews);
+        review_threads_pages += usize::from(validation.review_threads);
     }
 }
 
-fn review_page_info(page: &Value) -> Result<(bool, Option<&str>), CliError> {
-    let page_info = review_threads_page_info(page)?;
+#[derive(Clone, Copy)]
+struct ReviewValidation {
+    reviews: bool,
+    review_threads: bool,
+}
+
+impl ReviewValidation {
+    fn all() -> Self {
+        Self {
+            reviews: true,
+            review_threads: true,
+        }
+    }
+}
+
+fn next_cursor(
+    page: &Value,
+    connection: &str,
+    seen_cursors: &mut HashSet<String>,
+    pages: usize,
+) -> Result<Option<String>, CliError> {
+    let (has_next_page, cursor) = review_page_info(page, connection)?;
+    if !has_next_page {
+        return Ok(None);
+    }
+    if pages >= MAX_REVIEW_PAGES {
+        return Err(parse_json_failure(
+            "gh api graphql pagination",
+            format!("{connection} exceeded {MAX_REVIEW_PAGES} pages"),
+        ));
+    }
+    let cursor = cursor.expect("advancing review page has a cursor");
+    if !seen_cursors.insert(cursor.to_string()) {
+        return Err(parse_json_failure(
+            "gh api graphql pagination",
+            format!("{connection} cursor did not advance"),
+        ));
+    }
+    Ok(Some(cursor.to_string()))
+}
+
+fn review_page_info<'a>(
+    page: &'a Value,
+    connection: &str,
+) -> Result<(bool, Option<&'a str>), CliError> {
+    let page_info = review_connection_page_info(page, connection)?;
     let has_next_page = page_info
         .get("hasNextPage")
         .and_then(Value::as_bool)
-        .ok_or_else(|| review_shape_error("reviewThreads.pageInfo.hasNextPage"))?;
+        .ok_or_else(|| review_shape_error(&format!("{connection}.pageInfo.hasNextPage")))?;
     let cursor = page_info.get("endCursor").and_then(Value::as_str);
     if has_next_page && cursor.is_none_or(str::is_empty) {
-        return Err(review_shape_error("reviewThreads.pageInfo.endCursor"));
+        return Err(review_shape_error(&format!(
+            "{connection}.pageInfo.endCursor"
+        )));
     }
     Ok((has_next_page, cursor))
 }
 
-fn append_review_threads(first: &mut Value, next: &Value) {
-    let dst = first["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+fn append_review_connections(first: &mut Value, next: &Value, validation: ReviewValidation) {
+    if validation.reviews {
+        append_review_connection(first, next, "reviews");
+    }
+    if validation.review_threads {
+        append_review_connection(first, next, "reviewThreads");
+    }
+}
+
+fn append_review_connection(first: &mut Value, next: &Value, connection: &str) {
+    let dst = first["data"]["repository"]["pullRequest"][connection]["nodes"]
         .as_array_mut()
         .expect("review page was validated");
-    let src = next["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+    let src = next["data"]["repository"]["pullRequest"][connection]["nodes"]
         .as_array()
         .expect("review page was validated");
     dst.extend(src.iter().cloned());
-    first["data"]["repository"]["pullRequest"]["reviewThreads"]["pageInfo"] =
-        next["data"]["repository"]["pullRequest"]["reviewThreads"]["pageInfo"].clone();
+    first["data"]["repository"]["pullRequest"][connection]["pageInfo"] =
+        next["data"]["repository"]["pullRequest"][connection]["pageInfo"].clone();
 }
 
-fn validate_review_response(raw: &Value, require_reviews: bool) -> Result<(), CliError> {
+fn validate_review_response(raw: &Value, validation: ReviewValidation) -> Result<(), CliError> {
     let pr = review_pull_request(raw)?;
-    if require_reviews {
-        require_array(&pr["reviews"]["nodes"], "reviews.nodes")?;
+    if validation.reviews {
+        validate_reviews(pr)?;
     }
+    if validation.review_threads {
+        validate_review_threads(pr)?;
+    }
+    Ok(())
+}
+
+fn validate_reviews(pr: &Value) -> Result<(), CliError> {
+    let reviews = require_object(&pr["reviews"], "reviews")?;
+    require_page_info(&reviews["pageInfo"], "reviews.pageInfo")?;
+    require_array(&reviews["nodes"], "reviews.nodes")?;
+    Ok(())
+}
+
+fn validate_review_threads(pr: &Value) -> Result<(), CliError> {
     let threads = require_object(&pr["reviewThreads"], "reviewThreads")?;
-    require_page_info(&threads["pageInfo"])?;
+    require_page_info(&threads["pageInfo"], "reviewThreads.pageInfo")?;
     let nodes = require_array(&threads["nodes"], "reviewThreads.nodes")?;
     for (index, node) in nodes.iter().enumerate() {
         validate_review_thread(node, index)?;
@@ -417,20 +504,26 @@ fn review_pull_request(raw: &Value) -> Result<&Value, CliError> {
     require_object(pr, "data.repository.pullRequest")
 }
 
-fn review_threads_page_info(raw: &Value) -> Result<&Value, CliError> {
+fn review_connection_page_info<'a>(
+    raw: &'a Value,
+    connection: &str,
+) -> Result<&'a Value, CliError> {
     let pr = review_pull_request(raw)?;
-    require_object(&pr["reviewThreads"]["pageInfo"], "reviewThreads.pageInfo")
+    require_object(
+        &pr[connection]["pageInfo"],
+        &format!("{connection}.pageInfo"),
+    )
 }
 
-fn require_page_info(page_info: &Value) -> Result<(), CliError> {
-    require_object(page_info, "reviewThreads.pageInfo")?;
+fn require_page_info(page_info: &Value, context: &str) -> Result<(), CliError> {
+    require_object(page_info, context)?;
     let has_next = page_info["hasNextPage"]
         .as_bool()
-        .ok_or_else(|| review_shape_error("reviewThreads.pageInfo.hasNextPage"))?;
+        .ok_or_else(|| review_shape_error(&format!("{context}.hasNextPage")))?;
     match (has_next, page_info.get("endCursor")) {
         (true, Some(Value::String(cursor))) if !cursor.is_empty() => Ok(()),
         (false, Some(Value::String(_) | Value::Null)) => Ok(()),
-        _ => Err(review_shape_error("reviewThreads.pageInfo.endCursor")),
+        _ => Err(review_shape_error(&format!("{context}.endCursor"))),
     }
 }
 
@@ -527,7 +620,13 @@ mod tests {
     fn review_page(cursor: &str, has_next_page: bool) -> Value {
         json!({
             "data": {"repository": {"pullRequest": {
-                "reviews": {"nodes": []},
+                "reviews": {
+                    "nodes": [],
+                    "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                    }
+                },
                 "reviewThreads": {
                     "nodes": [],
                     "pageInfo": {
@@ -537,6 +636,15 @@ mod tests {
                 }
             }}}
         })
+    }
+
+    fn review_page_with_review_cursor(cursor: &str, has_next_page: bool) -> Value {
+        let mut page = review_page("", false);
+        page["data"]["repository"]["pullRequest"]["reviews"]["pageInfo"] = json!({
+            "hasNextPage": has_next_page,
+            "endCursor": cursor
+        });
+        page
     }
 
     fn review_thread(path: &str) -> Value {
@@ -555,7 +663,9 @@ mod tests {
         let mut first = review_page("next", true);
         first["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"] =
             json!([review_thread("first")]);
-        let pages = collect_review_pages(first, |_| {
+        let pages = collect_review_pages(first, |reviews_cursor, review_threads_cursor| {
+            assert!(reviews_cursor.is_none());
+            assert_eq!(review_threads_cursor, Some("next"));
             let mut next = review_page("done", false);
             next["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"] =
                 json!([review_thread("second")]);
@@ -572,7 +682,7 @@ mod tests {
     #[test]
     fn review_thread_pagination_rejects_malformed_pages() {
         let initial_error =
-            collect_review_pages(json!({"bad": true}), |_| unreachable!()).unwrap_err();
+            collect_review_pages(json!({"bad": true}), |_, _| unreachable!()).unwrap_err();
         assert!(
             initial_error
                 .to_string()
@@ -580,7 +690,7 @@ mod tests {
         );
 
         let first = review_page("next", true);
-        let next_error = collect_review_pages(first, |_| Ok(json!({"bad": true}))).unwrap_err();
+        let next_error = collect_review_pages(first, |_, _| Ok(json!({"bad": true}))).unwrap_err();
         assert!(
             next_error
                 .to_string()
@@ -591,34 +701,82 @@ mod tests {
     #[test]
     fn review_thread_pagination_rejects_a_repeated_cursor() {
         let first = review_page("same", true);
-        let error = collect_review_pages(first, |_| Ok(review_page("same", true))).unwrap_err();
+        let error = collect_review_pages(first, |_, _| Ok(review_page("same", true))).unwrap_err();
 
-        assert!(error.to_string().contains("cursor did not advance"));
+        assert!(
+            error
+                .to_string()
+                .contains("reviewThreads cursor did not advance")
+        );
     }
 
     #[test]
     fn review_thread_pagination_rejects_a_cursor_cycle() {
         let first = review_page("a", true);
         let mut cursors = ["b", "a"].into_iter();
-        let error = collect_review_pages(first, |_| {
+        let error = collect_review_pages(first, |_, _| {
             Ok(review_page(cursors.next().unwrap_or("a"), true))
         })
         .unwrap_err();
 
-        assert!(error.to_string().contains("cursor did not advance"));
+        assert!(
+            error
+                .to_string()
+                .contains("reviewThreads cursor did not advance")
+        );
     }
 
     #[test]
     fn review_thread_pagination_has_a_hard_page_cap() {
         let first = review_page("cursor-1", true);
         let mut page = 1;
-        let error = collect_review_pages(first, |_| {
+        let error = collect_review_pages(first, |_, _| {
             page += 1;
             Ok(review_page(&format!("cursor-{page}"), true))
         })
         .unwrap_err();
 
-        assert!(error.to_string().contains("exceeded 100 pages"));
+        assert!(
+            error
+                .to_string()
+                .contains("reviewThreads exceeded 100 pages")
+        );
+        assert_eq!(page, 100);
+    }
+
+    #[test]
+    fn review_pagination_rejects_a_cursor_cycle() {
+        let first = review_page_with_review_cursor("a", true);
+        let mut cursors = ["b", "a"].into_iter();
+        let error = collect_review_pages(first, |reviews_cursor, review_threads_cursor| {
+            assert!(reviews_cursor.is_some());
+            assert!(review_threads_cursor.is_none());
+            Ok(review_page_with_review_cursor(
+                cursors.next().unwrap_or("a"),
+                true,
+            ))
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("reviews cursor did not advance"));
+    }
+
+    #[test]
+    fn review_pagination_has_a_hard_page_cap() {
+        let first = review_page_with_review_cursor("cursor-1", true);
+        let mut page = 1;
+        let error = collect_review_pages(first, |reviews_cursor, review_threads_cursor| {
+            assert!(reviews_cursor.is_some());
+            assert!(review_threads_cursor.is_none());
+            page += 1;
+            Ok(review_page_with_review_cursor(
+                &format!("cursor-{page}"),
+                true,
+            ))
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("reviews exceeded 100 pages"));
         assert_eq!(page, 100);
     }
 }
