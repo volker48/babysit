@@ -28,12 +28,35 @@ Options:
 - `--nitpicks` — include CodeRabbit nitpick review-body findings
 - `--no-reviews` — settle without waiting for a bot review
 - `--timeout <secs>` — `wait` only; default 1800
-- `--interval <secs>` — `wait` only; default 30
+- `--interval <secs>` — `wait` only; default 30 when polling, 300 as the event-mode fallback
+- `--events` — `wait` only; use GitHub webhook events to wake the waiter
+- `--gateway-url <wss-url>` — required with `--events`; the gateway's base WebSocket URL
+
+## Event-assisted waits
+
+For a GitHub repository that already has the babysit gateway webhook configured, prefer event mode:
+
+```bash
+babysit gateway-token status
+babysit wait <number> --repo owner/repo --events \
+  --gateway-url wss://babysit.mindgoblin.pw/watch
+```
+
+The gateway token must first be enrolled in the macOS Keychain with
+`babysit gateway-token enroll`. Pass only the base `wss://` gateway URL: do not append a repository
+path, query, fragment, or credential. Event mode is GitHub-only; use normal polling for GitLab or
+for repositories without the webhook setup.
+
+Webhook events are wake signals, not authoritative PR state. The CLI still fetches GitHub after a
+wake and falls back to polling every 300 seconds by default. An explicit `--interval <secs>` changes
+that fallback interval, and `--timeout <secs>` remains the overall deadline. Configuration and
+authorization errors are fatal; transient disconnects retry while fallback polling continues.
 
 ## Workflow
 
-1. Run `babysit wait <number>` after pushing. It blocks until checks and bot reviews settle.
-   Run it in the background if other work should continue meanwhile.
+1. Run `babysit wait <number>` after pushing. Add `--events --gateway-url <wss-url>` when the
+   GitHub repository has the webhook gateway configured. It blocks until checks and bot reviews
+   settle. Run it in the background if other work should continue meanwhile.
 2. Check the exit code, then run `babysit findings <number>` to list unresolved findings.
 3. Address findings, push fixes, and repeat until it settles cleanly.
 
