@@ -124,7 +124,10 @@ babysit wait 63 --repo OWNER/REPOSITORY --events \
 A wake is not PR state. Both modes settle only after an authoritative GitHub snapshot fetch. Normal
 polling defaults to a 30-second interval. In event mode, omitting `--interval` uses a 300-second
 fallback poll; an explicit `--interval SECS` replaces that 300-second fallback. The overall
-`--timeout SECS` remains the deadline for initial fetches, reconnects, sleeps, and fallback polls.
+`--timeout SECS` remains the deadline for initial fetches, reconnects, sleeps, and fallback polls. A
+fetch that began before the deadline may still complete after it: a settled snapshot is accepted, an
+unsettled snapshot is retained for timeout reporting, and no late event observation or refetch is
+started once no time remains.
 
 ## How the event protocol preserves correctness
 

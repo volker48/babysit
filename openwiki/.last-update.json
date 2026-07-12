@@ -1,6 +1,6 @@
 {
-  "updatedAt": "2026-07-08T23:47:52.133Z",
-  "command": "init",
-  "gitHead": "4204db2e610c625fb747b1df5b00397a9e0b1393",
-  "model": "gpt-5.5-low"
+  "updatedAt": "2026-07-12T17:48:01.761Z",
+  "command": "update",
+  "gitHead": "a40e2329177a783443a43c32157df4e488ad61c7",
+  "model": "gpt-5.6-luna-xhigh"
 }

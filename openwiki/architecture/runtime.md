@@ -30,7 +30,9 @@
 - `findings` fetches once, prints selected findings, and returns `0` if fetching/parsing succeeded.
 - `wait` loops until settled or timed out. Retryable forge CLI failures are ignored until the
   deadline; non-retryable errors stop the command. The loop sleeps for the configured interval,
-  capped by remaining timeout.
+  capped by remaining timeout. A snapshot fetch that started before the deadline may complete after
+  it: a settled snapshot is accepted, while an unsettled snapshot becomes the timeout outcome. Once
+  no time remains, the loop skips snapshot observation and any event-triggered refetch.
 - `wait --events --gateway-url <wss-url>` retains that same loop but uses an event wake source.
   Event mode is GitHub-only and falls back every 300 seconds unless `--interval` is explicit. The
   manual deployment and operational boundary is documented in [Gateway operations](../operations/gateway.md).
