@@ -82,6 +82,9 @@ where
                 }
                 last_snapshot = Some((snapshot.clone(), settle.clone()));
                 let remaining = deadline.saturating_duration_since(wake_source.now());
+                if remaining.is_zero() {
+                    return Ok(timeout_outcome(last_snapshot));
+                }
                 if wake_source.observe_snapshot(&snapshot, remaining)? == SnapshotAction::RefetchNow
                 {
                     if wake_source.now() >= deadline {

@@ -57,6 +57,28 @@ impl WakeSource for ClockWakeSource {
     }
 }
 
+struct RejectingObserveWakeSource {
+    now: std::rc::Rc<std::cell::RefCell<Instant>>,
+}
+
+impl WakeSource for RejectingObserveWakeSource {
+    fn now(&self) -> Instant {
+        *self.now.borrow()
+    }
+
+    fn wait(&mut self, _duration: Duration) -> Result<(), CliError> {
+        Err(CliError::new("late snapshot should time out", false))
+    }
+
+    fn observe_snapshot(
+        &mut self,
+        _snapshot: &PrSnapshot,
+        _remaining: Duration,
+    ) -> Result<SnapshotAction, CliError> {
+        Err(CliError::new("late snapshot was observed", false))
+    }
+}
+
 fn snapshot(state: &str) -> PrSnapshot {
     PrSnapshot {
         number: 1,
@@ -123,12 +145,9 @@ fn settled_snapshot_fetched_past_deadline_is_accepted() {
 }
 
 #[test]
-fn unsettled_snapshot_fetched_past_deadline_times_out_with_that_snapshot() {
+fn unsettled_snapshot_fetched_past_deadline_times_out_before_observation() {
     let clock = std::rc::Rc::new(std::cell::RefCell::new(Instant::now()));
-    let mut wake_source = ClockWakeSource {
-        now: clock.clone(),
-        waits: Vec::new(),
-    };
+    let mut wake_source = RejectingObserveWakeSource { now: clock.clone() };
     let outcome = wait_until_settled(
         &mut |_| {
             *clock.borrow_mut() += Duration::from_secs(5);

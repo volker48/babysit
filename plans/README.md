@@ -7,9 +7,10 @@ done.
 
 Baseline verified at `9b5cac3`: `cargo fmt --all --check`, `cargo clippy
 --locked --all-targets --all-features -- -D warnings`, `cargo test --locked
---all` (119 pass), `cargo build --locked --release`, and `pnpm --filter
-@babysit/gateway lint | format:check | typecheck | test` (63 pass) were all
-green.
+--all` (119 pass), `cargo build --locked --release`, and the independent commands
+`pnpm --filter @babysit/gateway lint`, `pnpm --filter @babysit/gateway format:check`,
+`pnpm --filter @babysit/gateway typecheck`, and `pnpm --filter @babysit/gateway test`
+(63 pass) were all green.
 
 ## Execution order & status
 
