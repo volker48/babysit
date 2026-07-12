@@ -17,7 +17,7 @@ green.
 |------|-------|----------|--------|------------|--------|
 | 001 | Add GitHub Actions CI so PRs cannot merge unverified | P1 | S | — | DONE |
 | 002 | Make the wait loop honor the last fetched snapshot at the deadline | P1 | S | — | DONE |
-| 003 | Pin gateway alarm delivery, migration, and failure behavior with tests | P1 | M | — | TODO |
+| 003 | Pin gateway alarm delivery, migration, and failure behavior with tests | P1 | M | — | DONE |
 | 004 | Stop dead watcher sockets from wedging and reordering wake delivery | P1 | M | 003 | TODO |
 | 005 | Keep the gateway socket across idle read timeouts in event mode | P2 | M | 002 | TODO |
 | 006 | Small-fixes batch: rand advisory bump, hoisted regexes, --repo validation | P2 | S | — | TODO |
