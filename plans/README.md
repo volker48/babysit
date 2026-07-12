@@ -15,7 +15,7 @@ green.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
-| 001 | Add GitHub Actions CI so PRs cannot merge unverified | P1 | S | — | TODO |
+| 001 | Add GitHub Actions CI so PRs cannot merge unverified | P1 | S | — | DONE |
 | 002 | Make the wait loop honor the last fetched snapshot at the deadline | P1 | S | — | TODO |
 | 003 | Pin gateway alarm delivery, migration, and failure behavior with tests | P1 | M | — | TODO |
 | 004 | Stop dead watcher sockets from wedging and reordering wake delivery | P1 | M | 003 | TODO |
