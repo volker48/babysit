@@ -151,6 +151,46 @@ describe("durable wake delivery", () => {
     });
   });
 
+  it("drops legacy outbox rows missing current columns during rebuild", async () => {
+    // Characterizes current behavior: rows from unrecognized legacy shapes are dropped, not migrated.
+    const repository = "outbox-schema-drop";
+    await withHistory(repository, (_, state) => {
+      state.storage.sql.exec("DROP TABLE wake_outbox");
+      state.storage.sql.exec(
+        "CREATE TABLE wake_outbox (cursor INTEGER PRIMARY KEY, retry_at_ms INTEGER NOT NULL, " +
+          "received_at_ms INTEGER NOT NULL, kind TEXT NOT NULL, delivery_id TEXT NOT NULL, " +
+          "pr_number INTEGER, head_oid TEXT)",
+      );
+      state.storage.sql.exec(
+        "INSERT INTO wake_outbox VALUES (?, ?, ?, ?, ?, ?, ?)",
+        8,
+        base,
+        base,
+        "status",
+        "dropped-delivery",
+        8,
+        "head",
+      );
+    });
+    await evictDurableObject(stub(repository));
+    await withHistory(repository, async (history, state) => {
+      expect(tableColumns(state, "wake_outbox")).toEqual([
+        "cursor",
+        "retry_at_ms",
+        "received_at_ms",
+        "kind",
+        "delivery_id",
+        "repository_id",
+        "pr_number",
+        "head_oid",
+      ]);
+      expect(state.storage.sql.exec("SELECT * FROM wake_outbox").toArray()).toEqual([]);
+      const sent: WakeIntent[] = [];
+      await history.deliver(base, (intent) => sent.push(intent));
+      expect(sent).toEqual([]);
+    });
+  });
+
   it("replays only leading and trailing logical intents from a burst", async () => {
     await withHistory("logical-replay", async (history) => {
       await history.accept(wake(1, { changeNumber: 7 }), base);
@@ -327,6 +367,24 @@ describe("durable wake delivery", () => {
       expect(attempts).toEqual([1]);
       await history.deliver(base + 1_000, (intent) => attempts.push(intent.cursor));
       expect(attempts).toEqual([1, 1, 2]);
+    });
+  });
+
+  it("KNOWN BUG (inverted by plan 004): tail intents deliver before a deferred cursor retries", async () => {
+    // Plan 004 will invert this characterization: a deferred failure must also defer the tail
+    // so retries preserve cursor order.
+    await withHistory("out-of-order-retry", async (history, state) => {
+      await history.accept(wake(1, { changeNumber: 1 }), base);
+      await history.accept(wake(2, { changeNumber: 2 }), base);
+      const attempts: number[] = [];
+      await history.deliver(base, (intent) => {
+        attempts.push(intent.cursor);
+        if (intent.cursor === 1) throw new Error("send failed");
+      });
+      expect(attempts).toEqual([1]);
+      expect(await state.storage.getAlarm()).toBe(base);
+      await history.deliver(base + 1, (intent) => attempts.push(intent.cursor));
+      expect(attempts).toEqual([1, 2]);
     });
   });
 

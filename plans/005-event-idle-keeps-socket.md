@@ -146,13 +146,13 @@ let Ok(timeout) = remaining_timeout_at(deadline, now()) else {
 };
 ```
 
-Leave the *flush* call's `remaining_timeout_at(...)?` (line 519) as-is — failing a pong write near the deadline is a genuine transport problem. Leave `remaining_timeout_at` itself unchanged (it is used by send/connect paths where exhaustion must stay retryable).
+Leave the *flush* call's `remaining_timeout_at(...)?` (line 519) as-is — failing a pong write near the deadline is a genuine transport problem. Leave `remaining_timeout_at` itself unchanged (it is used by send/connect paths where exhaustion must stay retryable). At `wait_for_socket`, ensure this exhausted-read `Ok(None)` follows the idle arm without clearing `self.socket`. Add a regression test that reads a `Message::Ping` just before the deadline, advances the fake clock to the deadline during a successful flush, and verifies the subsequent exhausted read is treated as idle (`Ok(None)`) rather than retryable, with the established socket retained. A genuine pong flush/write error must remain retryable.
 
 **Verify**: `cargo test --locked --test event_wait` → same pass/fail set as after Step 2 (this branch is exercised only through the production `TungsteniteSocket`; unit behavior is covered by the existing `read_text_until` doctests/tests if present — if `rg -n "read_text_until" tests/ src/event.rs` shows dedicated unit tests, confirm they still pass or update their exhaustion-case expectation to `Ok(None)`).
 
 ### Step 4: Rewrite the reconnect test to cover a *real* transport error
 
-Replace `established_read_timeout_falls_back_then_reconnects_and_refetches_after_ready` with `established_transport_error_reconnects_and_refetches_after_ready`: same three-plan `PlannedFactory` shape, but make the first connection end in a transport error instead of idle. `PlannedSocket::read_text` returns `Ok(self.received.pop_front().flatten())` and cannot yield `Err`; extend the fake minimally — change `PlannedSocket.received` to `VecDeque<Result<Option<String>, GatewayError>>` (or add an `errors_after` flag), keeping all other tests' plan literals compiling (update the handful of `VecDeque::from([...])` literals mechanically, e.g. wrap entries in `Ok(...)`). First plan: `[Ok(Some(ready 1)), Err(GatewayError::Retryable)]`; second plan `Err(GatewayError::Retryable)` (connect fails); third `[Ok(Some(ready 2))]`. Keep the original assertions: refetch after re-ready with `"after":1` in the second registration, backoff sleep of 1s recorded.
+Replace `established_read_timeout_falls_back_then_reconnects_and_refetches_after_ready` with `established_transport_error_reconnects_and_refetches_after_ready`: same three-plan `PlannedFactory` shape, but make the first connection end in a transport error instead of idle. Change `PlannedSocket.received` to `VecDeque<Result<Option<String>, GatewayError>>` and return `self.received.pop_front().unwrap_or(Ok(None))`; this preserves the empty-queue idle behavior while allowing a queued `Err`. Update the handful of existing `VecDeque::from([...])` plan literals mechanically by wrapping their entries in `Ok(...)`. First plan: `[Ok(Some(ready 1)), Err(GatewayError::Retryable)]`; second plan `Err(GatewayError::Retryable)` (connect fails); third `[Ok(Some(ready 2))]`. Keep the original assertions: refetch after re-ready with `"after":1` in the second registration, backoff sleep of 1s recorded.
 
 **Verify**: `cargo test --locked --test event_wait` → ALL tests pass.
 
@@ -164,6 +164,7 @@ Replace `established_read_timeout_falls_back_then_reconnects_and_refetches_after
 
 - New: `established_idle_timeout_keeps_the_socket_and_fetches_on_interval` (Step 1) — fails before the fix, passes after; proves one connect, one registration, interval-paced fetches with no doubling.
 - Rewritten: `established_transport_error_reconnects_and_refetches_after_ready` (Step 4) — preserves coverage of the legitimate reconnect path (backoff, re-register with `after`, post-ready refetch).
+- New control-frame regression: a ping that reaches the deadline after a successful flush is treated as idle and keeps the established socket; pong flush/write failures remain retryable.
 - Regression guards, unmodified: `a_wake_causes_only_one_immediate_authoritative_refetch`, `replay_at_ready_cursor_is_ignored_until_a_newer_wake_arrives`, `repeated_reconnect_failures_wait_for_the_full_fallback_before_refetching`, `successful_registration_resets_the_next_retry_delay`, and the registration/deadline tests (lines 282-380).
 
 ## Done criteria

@@ -278,6 +278,64 @@ describe("GitHub status gateway", () => {
     second.close();
   });
 
+  it("delivers the trailing debounced wake when the alarm fires", async () => {
+    const repository = "alarm-delivery/repo";
+    const socket = await watcher(repository);
+    const ready = nextMessage(socket);
+    register(socket, repository, "alarm-head", null);
+    expect(await ready).toMatchObject({ type: "ready", version: 1, cursor: 0 });
+
+    const firstWake = nextMessage(socket);
+    const stub = env.REPOSITORY_GATEWAY.get(env.REPOSITORY_GATEWAY.idFromName(repository));
+    let deadline: number | undefined;
+    await runInDurableObject(stub, async (instance, state) => {
+      const leading = await instance.fetch(
+        new Request("https://repository-gateway/wake", {
+          method: "POST",
+          body: JSON.stringify({
+            deliveryId: "alarm-leading",
+            kind: "status",
+            repository: { id: "1015", fullName: repository },
+            changeNumber: 7,
+            headRevision: "alarm-head",
+            receivedAt: Date.now(),
+          }),
+        }),
+      );
+      expect(leading.status).toBe(202);
+      const trailing = await instance.fetch(
+        new Request("https://repository-gateway/wake", {
+          method: "POST",
+          body: JSON.stringify({
+            deliveryId: "alarm-trailing",
+            kind: "status",
+            repository: { id: "1015", fullName: repository },
+            changeNumber: 7,
+            headRevision: "alarm-head",
+            receivedAt: Date.now() + 1,
+          }),
+        }),
+      );
+      expect(trailing.status).toBe(202);
+      const alarm = await state.storage.getAlarm();
+      expect(typeof alarm).toBe("number");
+      if (typeof alarm !== "number") throw new Error("expected debounce alarm");
+      deadline = alarm;
+    });
+
+    expect(await firstWake).toMatchObject({ type: "wake", version: 1, cursor: 1 });
+    if (deadline === undefined) throw new Error("expected debounce deadline");
+    const trailingWake = nextMessage(socket);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(deadline + 1);
+    try {
+      await runInDurableObject(stub, (instance) => instance.alarm());
+    } finally {
+      clock.mockRestore();
+    }
+    expect(await trailingWake).toMatchObject({ type: "wake", version: 1, cursor: 2 });
+    socket.close();
+  });
+
   it("fails closed when watcher or webhook secret bindings are absent or empty", async () => {
     for (const token of [undefined, ""]) {
       const env = missingBindingEnv();
@@ -329,6 +387,73 @@ describe("GitHub status gateway", () => {
     expect(await resumedReady).toMatchObject({ type: "ready", cursor: 1 });
     socket.close();
     resumed.close();
+  });
+
+  it("KNOWN BUG (inverted by plan 004): retry re-sends the wake to healthy watchers", async () => {
+    // Characterizes the amplification bug: Plan 004 will avoid replaying a successful send.
+    const repository = "retry-duplicate/repo";
+    const failing = await watcher(repository);
+    const healthy = await watcher(repository);
+    const failingReady = nextMessage(failing);
+    const healthyReady = nextMessage(healthy);
+    register(failing, repository, "failing-head", null, 51);
+    register(healthy, repository, "healthy-head", null, 52);
+    await failingReady;
+    await healthyReady;
+
+    const firstWake = nextMessage(healthy);
+    const stub = env.REPOSITORY_GATEWAY.get(env.REPOSITORY_GATEWAY.idFromName(repository));
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await runInDurableObject(stub, async (instance, state) => {
+      const failingSocket = state
+        .getWebSockets()
+        .find(
+          (socket) =>
+            socket.deserializeAttachment<{ headRevision?: string }>().headRevision ===
+            "failing-head",
+        );
+      if (!failingSocket) throw new Error("expected failing watcher");
+      Object.defineProperty(failingSocket, "send", {
+        value: () => {
+          throw new Error("closed watcher");
+        },
+      });
+      const response = await instance.fetch(
+        new Request("https://repository-gateway/wake", {
+          method: "POST",
+          body: JSON.stringify({
+            deliveryId: "retry-duplicate",
+            kind: "check_run",
+            repository: { id: "1016", fullName: repository },
+            receivedAt: Date.now(),
+          }),
+        }),
+      );
+      expect(response.status).toBe(202);
+      expect(state.storage.sql.exec("SELECT cursor FROM wake_outbox").toArray()).toEqual([
+        { cursor: 1 },
+      ]);
+    });
+
+    expect(await firstWake).toMatchObject({ type: "wake", cursor: 1 });
+    const retryWake = nextMessage(healthy);
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now + 1_001);
+    try {
+      await runInDurableObject(stub, async (instance, state) => {
+        await instance.alarm();
+        expect(state.storage.sql.exec("SELECT cursor FROM wake_outbox").toArray()).toEqual([
+          { cursor: 1 },
+        ]);
+      });
+    } finally {
+      clock.mockRestore();
+    }
+    expect(await retryWake).toMatchObject({ type: "wake", cursor: 1 });
+    expect(warning).toHaveBeenCalledTimes(2);
+    warning.mockRestore();
+    failing.close();
+    healthy.close();
   });
 
   it("sends ready before replaying a retained matching status", async () => {

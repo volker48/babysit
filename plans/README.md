@@ -7,9 +7,10 @@ done.
 
 Baseline verified at `9b5cac3`: `cargo fmt --all --check`, `cargo clippy
 --locked --all-targets --all-features -- -D warnings`, `cargo test --locked
---all` (119 pass), `cargo build --locked --release`, and `pnpm --filter
-@babysit/gateway lint | format:check | typecheck | test` (63 pass) were all
-green.
+--all` (119 pass), `cargo build --locked --release`, and the independent commands
+`pnpm --filter @babysit/gateway lint`, `pnpm --filter @babysit/gateway format:check`,
+`pnpm --filter @babysit/gateway typecheck`, and `pnpm --filter @babysit/gateway test`
+(63 pass) were all green.
 
 ## Execution order & status
 
@@ -17,7 +18,7 @@ green.
 |------|-------|----------|--------|------------|--------|
 | 001 | Add GitHub Actions CI so PRs cannot merge unverified | P1 | S | — | DONE |
 | 002 | Make the wait loop honor the last fetched snapshot at the deadline | P1 | S | — | DONE |
-| 003 | Pin gateway alarm delivery, migration, and failure behavior with tests | P1 | M | — | TODO |
+| 003 | Pin gateway alarm delivery, migration, and failure behavior with tests | P1 | M | — | DONE |
 | 004 | Stop dead watcher sockets from wedging and reordering wake delivery | P1 | M | 003 | TODO |
 | 005 | Keep the gateway socket across idle read timeouts in event mode | P2 | M | 002 | TODO |
 | 006 | Small-fixes batch: rand advisory bump, hoisted regexes, --repo validation | P2 | S | — | TODO |
