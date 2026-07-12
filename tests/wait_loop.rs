@@ -101,7 +101,7 @@ fn fetches_receive_shrinking_remaining_budget() {
 }
 
 #[test]
-fn settled_snapshot_after_deadline_times_out_without_accepting_it() {
+fn settled_snapshot_fetched_past_deadline_is_accepted() {
     let clock = std::rc::Rc::new(std::cell::RefCell::new(Instant::now()));
     let mut wake_source = ClockWakeSource {
         now: clock.clone(),
@@ -119,7 +119,32 @@ fn settled_snapshot_after_deadline_times_out_without_accepting_it() {
     )
     .unwrap();
 
-    assert!(matches!(outcome, WaitOutcome::TimedOutWithoutSnapshot));
+    assert!(matches!(outcome, WaitOutcome::Settled { .. }));
+}
+
+#[test]
+fn unsettled_snapshot_fetched_past_deadline_times_out_with_that_snapshot() {
+    let clock = std::rc::Rc::new(std::cell::RefCell::new(Instant::now()));
+    let mut wake_source = ClockWakeSource {
+        now: clock.clone(),
+        waits: Vec::new(),
+    };
+    let outcome = wait_until_settled(
+        &mut |_| {
+            *clock.borrow_mut() += Duration::from_secs(5);
+            Ok(snapshot("OPEN"))
+        },
+        &mut wake_source,
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        &SettleOptions::default(),
+    )
+    .unwrap();
+
+    let WaitOutcome::TimedOut { snapshot, .. } = outcome else {
+        panic!("expected timeout outcome");
+    };
+    assert_eq!(snapshot.state, "OPEN");
 }
 
 #[test]

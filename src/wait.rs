@@ -75,9 +75,6 @@ where
             return Ok(timeout_outcome(last_snapshot));
         }
         match fetch_snapshot(remaining) {
-            Ok(_snapshot) if wake_source.now() >= deadline => {
-                return Ok(timeout_outcome(last_snapshot));
-            }
             Ok(snapshot) => {
                 let settle = evaluate_settled(&snapshot, settle_options);
                 if settle.settled {
