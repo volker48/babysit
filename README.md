@@ -11,16 +11,33 @@ agents or humans to act on.
 
 ## Install
 
-Prerequisites:
-
-- Rust 1.85.1 or newer
-- `gh` authenticated for GitHub repositories
-- `glab` authenticated for GitLab repositories
-
-Build from source:
+Release binaries require macOS. Install the archive for your Mac into a directory on `PATH`:
 
 ```bash
-cargo build --release
+set -euo pipefail
+version="$(gh release view --repo volker48/babysit --json tagName \
+  --jq '.tagName | ltrimstr("v")')"
+case "$(uname -m)" in
+  arm64) target=aarch64-apple-darwin ;;
+  x86_64) target=x86_64-apple-darwin ;;
+  *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+archive="babysit-v${version}-${target}.tar.gz"
+gh release download "v${version}" --repo volker48/babysit \
+  --pattern "$archive" --pattern "$archive.sha256"
+shasum -a 256 -c "$archive.sha256"
+tar -xzf "$archive"
+mkdir -p "$HOME/.local/bin"
+install -m 755 babysit "$HOME/.local/bin/babysit"
+```
+
+Ensure `$HOME/.local/bin` is on `PATH`. Runtime prerequisites are `gh` authenticated for GitHub
+repositories or `glab` authenticated for GitLab repositories.
+
+To build from source, install Rust 1.85.1 or newer and run:
+
+```bash
+cargo build --locked --release
 ./target/release/babysit status 123 --repo owner/repo
 ```
 
@@ -141,3 +158,21 @@ cargo build --locked --release
 
 GitLab CI runs the same format, lint, test, and release-build gates on branches
 and merge requests.
+
+## Release policy
+
+Version tags matching the crate version (for example, `v1.0.0`) publish native archives for these
+supported targets:
+
+| Target | GitHub-hosted runner |
+| --- | --- |
+| Apple silicon (`aarch64-apple-darwin`) | `macos-15` |
+| Intel (`x86_64-apple-darwin`) | `macos-15-intel` |
+
+The GitHub repository owner (`volker48`) owns releases; `.github/workflows/release.yml` performs
+build and publication. It uses locked Cargo dependencies, smoke-tests `--help` and `--version`,
+and publishes per-archive SHA-256 files plus `SHA256SUMS`.
+
+Initial releases are not code-signed or notarized and do not publish separate build provenance.
+Checksums provide download-integrity verification, not publisher identity. Revisit signing and
+provenance before expanding the supported platform matrix.
