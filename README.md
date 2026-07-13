@@ -62,6 +62,7 @@ babysit status [<pr-or-mr-number>] [options]
 babysit findings [<pr-or-mr-number>] [options]
 babysit wait [<pr-or-mr-number>] [options]
 babysit gateway-token <enroll|status|delete|rotate>
+babysit gateway-webhook setup --repo <owner/repo>
 babysit --help
 babysit --version
 ```
@@ -107,9 +108,19 @@ babysit status 63 --repo example-org/example-repo --no-reviews
 
 ### Event-assisted waits
 
-Polling is the default. To opt in to GitHub event-assisted wake signals, store an
-operator-provided gateway bearer token in the macOS Keychain, then provide the non-secret gateway
-URL:
+Polling is the default. Deploy the Cloudflare Worker and configure its `WEBHOOK_SECRET` and
+`WATCHER_TOKEN` manually first. Repository hook setup is automated and uses the existing
+`WEBHOOK_SECRET` from protected stdin or a no-echo prompt:
+
+```bash
+protected-secret-source cloudflare-webhook-secret | \
+  babysit gateway-webhook setup --repo example-org/example-repo
+```
+
+The setup command only creates or updates the fixed repository hook; it never generates or prints
+the secret and does not deploy or configure Cloudflare. To opt in to GitHub event-assisted wake
+signals, store an operator-provided gateway bearer token in the macOS Keychain, then provide the
+non-secret gateway URL:
 
 ```bash
 babysit gateway-token enroll
@@ -129,9 +140,9 @@ query, fragment, or extra path. babysit appends percent-encoded owner and reposi
 from its authoritative snapshot. GitLab event mode is unavailable. An event is only a wake signal:
 babysit performs an authoritative GitHub fetch after gateway ready,
 wake, replay, resync, and fallback ticks. Without an explicit `--interval`, event mode uses a
-300-second fallback poll; an explicit interval wins. This client does not provision a gateway,
-webhook, Worker, or token server-side. For the manual Cloudflare deployment, webhook, Keychain,
-rotation, and troubleshooting procedure, see the [gateway operations runbook](openwiki/operations/gateway.md).
+300-second fallback poll; an explicit interval wins. The repository-hook setup above does not deploy the Worker, set Cloudflare secrets, enroll the
+bearer token, or configure the manual webhook fallback. For those manual Cloudflare deployment,
+Keychain, rotation, and troubleshooting procedures, see the [gateway operations runbook](openwiki/operations/gateway.md).
 
 ## Exit codes
 

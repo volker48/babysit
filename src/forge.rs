@@ -1,5 +1,5 @@
 use std::fmt;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::process::{Command, Output, Stdio};
 use std::thread::{self, JoinHandle, sleep};
 use std::time::{Duration, Instant};
@@ -102,6 +102,8 @@ pub fn auto_detect_forge() -> ForgeName {
 
 const CLI_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_JSON_PAGES: usize = 100;
+type StreamReader = JoinHandle<io::Result<Vec<u8>>>;
+type StreamReaders = (StreamReader, StreamReader);
 
 pub fn run_json(command: &str, args: &[String], context: &str) -> Result<Value, CliError> {
     run_json_deadline(command, args, context, None)
@@ -113,7 +115,32 @@ pub fn run_json_deadline(
     context: &str,
     deadline: Option<Instant>,
 ) -> Result<Value, CliError> {
-    let output = command_output(command, args, context, deadline)?;
+    run_json_output(command_output(command, args, context, deadline)?, context)
+}
+
+pub fn run_json_with_stdin(
+    command: &str,
+    args: &[String],
+    context: &str,
+    input: &[u8],
+) -> Result<Value, CliError> {
+    run_json_with_stdin_deadline(command, args, context, input, None)
+}
+
+pub fn run_json_with_stdin_deadline(
+    command: &str,
+    args: &[String],
+    context: &str,
+    input: &[u8],
+    deadline: Option<Instant>,
+) -> Result<Value, CliError> {
+    run_json_output(
+        command_output_with_stdin(command, args, context, deadline, input)?,
+        context,
+    )
+}
+
+fn run_json_output(output: Output, context: &str) -> Result<Value, CliError> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     if let Some(signal) = signal_text(&output) {
         return Err(cli_error(
@@ -142,12 +169,27 @@ fn command_output(
     context: &str,
     deadline: Option<Instant>,
 ) -> Result<Output, CliError> {
+    command_output_with_stdin(command, args, context, deadline, &[])
+}
+
+fn command_output_with_stdin(
+    command: &str,
+    args: &[String],
+    context: &str,
+    deadline: Option<Instant>,
+    input: &[u8],
+) -> Result<Output, CliError> {
     let deadline = command_deadline(Instant::now(), deadline)?;
     if Instant::now() >= deadline {
         return Err(timeout_error(context));
     }
     let mut child = Command::new(command)
         .args(args)
+        .stdin(if input.is_empty() {
+            Stdio::null()
+        } else {
+            Stdio::piped()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -162,6 +204,56 @@ fn command_output(
         .ok_or_else(|| cli_error(context, "", Some("missing stderr pipe".to_string()), false))?;
     let stdout_reader = read_stream(stdout);
     let stderr_reader = read_stream(stderr);
+    let (stdout_reader, stderr_reader) = if input.is_empty() {
+        (stdout_reader, stderr_reader)
+    } else {
+        write_child_stdin(&mut child, input, context, stdout_reader, stderr_reader)?
+    };
+    wait_for_child(child, deadline, context, stdout_reader, stderr_reader)
+}
+
+fn write_child_stdin(
+    child: &mut std::process::Child,
+    input: &[u8],
+    context: &str,
+    stdout_reader: JoinHandle<io::Result<Vec<u8>>>,
+    stderr_reader: JoinHandle<io::Result<Vec<u8>>>,
+) -> Result<StreamReaders, CliError> {
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = join_stream(stdout_reader, context);
+        let _ = join_stream(stderr_reader, context);
+        return Err(cli_error(
+            context,
+            "",
+            Some("missing stdin pipe".to_string()),
+            false,
+        ));
+    };
+    if stdin.write_all(input).is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = join_stream(stdout_reader, context);
+        let _ = join_stream(stderr_reader, context);
+        return Err(cli_error(
+            context,
+            "",
+            Some("could not write command input".to_string()),
+            false,
+        ));
+    }
+    drop(stdin);
+    Ok((stdout_reader, stderr_reader))
+}
+
+fn wait_for_child(
+    mut child: std::process::Child,
+    deadline: Instant,
+    context: &str,
+    stdout_reader: JoinHandle<io::Result<Vec<u8>>>,
+    stderr_reader: JoinHandle<io::Result<Vec<u8>>>,
+) -> Result<Output, CliError> {
     loop {
         if Instant::now() >= deadline {
             let _ = child.kill();
