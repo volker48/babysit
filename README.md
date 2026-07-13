@@ -142,8 +142,8 @@ babysit performs an authoritative GitHub fetch after gateway ready,
 wake, replay, resync, and fallback ticks. Without an explicit `--interval`, event mode uses a
 300-second fallback poll; an explicit interval wins. The repository-hook setup above does not
 deploy the Worker, set Cloudflare secrets, enroll the bearer token, or configure the manual
-webhook setup alternative. For those manual Cloudflare deployment, Keychain, rotation, and
-troubleshooting procedures, see the [gateway operations runbook](openwiki/operations/gateway.md).
+webhook setup alternative. See the runbook for manual Cloudflare deployment, Keychain, rotation,
+and troubleshooting procedures: [gateway operations runbook](openwiki/operations/gateway.md).
 
 ## Exit codes
 

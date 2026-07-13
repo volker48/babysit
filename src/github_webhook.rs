@@ -117,9 +117,10 @@ pub fn validate_repository(repo: &str) -> Result<(), &'static str> {
 }
 
 fn valid_repository_part(value: &str) -> bool {
-    value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    !matches!(value, "." | "..")
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
 }
 
 /// Idempotently creates or updates the fixed babysit GitHub webhook.

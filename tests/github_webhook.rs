@@ -28,29 +28,61 @@ impl GhClient for FakeGh {
     }
 }
 
-fn hook(id: u64, url: &str) -> Value {
-    hook_with(id, url, "web", true, "json", json!("0"), standard_events())
-}
-
-fn hook_with(
-    id: u64,
-    url: &str,
-    name: &str,
+struct HookOptions {
+    name: &'static str,
     active: bool,
-    content_type: &str,
+    content_type: &'static str,
     insecure_ssl: Value,
     events: Value,
-) -> Value {
+}
+
+impl HookOptions {
+    fn standard() -> Self {
+        Self {
+            name: "web",
+            active: true,
+            content_type: "json",
+            insecure_ssl: json!("0"),
+            events: standard_events(),
+        }
+    }
+
+    fn with_name(mut self, name: &'static str) -> Self {
+        self.name = name;
+        self
+    }
+
+    fn with_active(mut self, active: bool) -> Self {
+        self.active = active;
+        self
+    }
+
+    fn with_insecure_ssl(mut self, insecure_ssl: Value) -> Self {
+        self.insecure_ssl = insecure_ssl;
+        self
+    }
+
+    fn with_events(mut self, events: Value) -> Self {
+        self.events = events;
+        self
+    }
+}
+
+fn hook(id: u64, url: &str) -> Value {
+    hook_with(id, url, HookOptions::standard())
+}
+
+fn hook_with(id: u64, url: &str, options: HookOptions) -> Value {
     json!({
         "id": id,
-        "name": name,
-        "active": active,
+        "name": options.name,
+        "active": options.active,
         "config": {
             "url": url,
-            "content_type": content_type,
-            "insecure_ssl": insecure_ssl
+            "content_type": options.content_type,
+            "insecure_ssl": options.insecure_ssl
         },
-        "events": events
+        "events": options.events
     })
 }
 
@@ -114,11 +146,7 @@ fn accepts_numeric_insecure_ssl_zero_during_reconciliation() {
     let numeric_hook = hook_with(
         7,
         WEBHOOK_URL,
-        "web",
-        true,
-        "json",
-        json!(0),
-        standard_events(),
+        HookOptions::standard().with_insecure_ssl(json!(0)),
     );
     let mut gh = FakeGh {
         reads: VecDeque::from([Ok(json!([])), Ok(json!([numeric_hook]))]),
@@ -185,11 +213,7 @@ fn reordered_events_are_accepted_during_reconciliation() {
             Ok(json!([hook_with(
                 7,
                 WEBHOOK_URL,
-                "web",
-                true,
-                "json",
-                json!("0"),
-                json!([
+                HookOptions::standard().with_events(json!([
                     "issue_comment",
                     "pull_request_review_thread",
                     "pull_request_review_comment",
@@ -198,7 +222,7 @@ fn reordered_events_are_accepted_during_reconciliation() {
                     "status",
                     "check_suite",
                     "check_run"
-                ]),
+                ])),
             )])),
         ]),
         mutations: Vec::new(),
@@ -218,11 +242,7 @@ fn incorrect_event_membership_is_rejected_during_reconciliation() {
             Ok(json!([hook_with(
                 7,
                 WEBHOOK_URL,
-                "web",
-                true,
-                "json",
-                json!("0"),
-                json!([
+                HookOptions::standard().with_events(json!([
                     "check_run",
                     "check_suite",
                     "status",
@@ -231,7 +251,7 @@ fn incorrect_event_membership_is_rejected_during_reconciliation() {
                     "pull_request_review_comment",
                     "pull_request_review_thread",
                     "unexpected_event"
-                ]),
+                ])),
             )])),
         ]),
         mutations: Vec::new(),
@@ -254,11 +274,7 @@ fn duplicate_events_are_rejected_during_reconciliation() {
             Ok(json!([hook_with(
                 7,
                 WEBHOOK_URL,
-                "web",
-                true,
-                "json",
-                json!("0"),
-                json!([
+                HookOptions::standard().with_events(json!([
                     "check_run",
                     "check_run",
                     "status",
@@ -267,7 +283,7 @@ fn duplicate_events_are_rejected_during_reconciliation() {
                     "pull_request_review_comment",
                     "pull_request_review_thread",
                     "issue_comment"
-                ]),
+                ])),
             )])),
         ]),
         mutations: Vec::new(),
@@ -286,11 +302,7 @@ fn unexpected_name_at_exact_url_conflicts_without_mutating() {
         reads: VecDeque::from([Ok(json!([hook_with(
             1,
             WEBHOOK_URL,
-            "unexpected",
-            true,
-            "json",
-            json!("0"),
-            standard_events(),
+            HookOptions::standard().with_name("unexpected"),
         )]))]),
         mutations: Vec::new(),
         argv: Vec::new(),
@@ -394,15 +406,7 @@ fn mutation_errors_redact_raw_and_json_escaped_secrets() {
 
 #[test]
 fn unexpected_non_secret_state_is_rejected_after_mutation() {
-    let inactive_hook = hook_with(
-        7,
-        WEBHOOK_URL,
-        "web",
-        false,
-        "json",
-        json!("0"),
-        standard_events(),
-    );
+    let inactive_hook = hook_with(7, WEBHOOK_URL, HookOptions::standard().with_active(false));
     let mut gh = FakeGh {
         reads: VecDeque::from([Ok(json!([])), Ok(json!([inactive_hook]))]),
         mutations: Vec::new(),
