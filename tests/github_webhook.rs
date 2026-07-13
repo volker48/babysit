@@ -378,6 +378,18 @@ fn mutation_errors_redact_raw_and_json_escaped_secrets() {
             .message
             .contains(&escaped_secret[1..escaped_secret.len() - 1])
     );
+    assert_eq!(gh.argv[1][0], "api");
+    assert_eq!(gh.argv[1][1], "--method");
+    assert!(
+        gh.argv[1]
+            .iter()
+            .all(|argument| !argument.contains(secret_value))
+    );
+    assert!(
+        gh.argv[1]
+            .iter()
+            .all(|argument| !argument.contains(&escaped_secret))
+    );
 }
 
 #[test]
