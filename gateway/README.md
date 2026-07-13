@@ -21,15 +21,15 @@ alarm late, but late/retried alarms drain retained work in cursor order rather t
 
 The Worker deployment and its two secrets (`WEBHOOK_SECRET` and `WATCHER_TOKEN`) remain manual;
 Cloudflare configuration, Keychain bearer-token enrollment, rotation, and the manual webhook
-fallback are not provisioned by this package. After deploying the Worker and setting
+setup alternative are not provisioned by this package. After deploying the Worker and setting
 `WEBHOOK_SECRET`, the repository hook can be created or reconciled through the authenticated local
-CLI without generating or exposing the existing secret:
+CLI without generating or exposing the existing secret. For interactive use, run:
 
 ```bash
-protected-secret-source cloudflare-webhook-secret | \
-  babysit gateway-webhook setup --repo OWNER/REPOSITORY
+babysit gateway-webhook setup --repo OWNER/REPOSITORY
 ```
 
+Automation may pipe protected output from the operator's credential manager to the command's stdin.
 The command uses the fixed endpoint and event set, and is idempotent. The canonical manual
 deployment, webhook, Keychain, rotation, privacy, and troubleshooting runbook is [Gateway
 operations](../openwiki/operations/gateway.md). It names the required Worker secrets without

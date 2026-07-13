@@ -169,7 +169,7 @@ fn command_output(
     context: &str,
     deadline: Option<Instant>,
 ) -> Result<Output, CliError> {
-    command_output_with_stdin(command, args, context, deadline, &[])
+    command_output_inner(command, args, context, deadline, None)
 }
 
 fn command_output_with_stdin(
@@ -179,16 +179,25 @@ fn command_output_with_stdin(
     deadline: Option<Instant>,
     input: &[u8],
 ) -> Result<Output, CliError> {
+    command_output_inner(command, args, context, deadline, Some(input))
+}
+
+fn command_output_inner(
+    command: &str,
+    args: &[String],
+    context: &str,
+    deadline: Option<Instant>,
+    input: Option<&[u8]>,
+) -> Result<Output, CliError> {
     let deadline = command_deadline(Instant::now(), deadline)?;
     if Instant::now() >= deadline {
         return Err(timeout_error(context));
     }
     let mut child = Command::new(command)
         .args(args)
-        .stdin(if input.is_empty() {
-            Stdio::null()
-        } else {
-            Stdio::piped()
+        .stdin(match input {
+            Some(_) => Stdio::piped(),
+            None => Stdio::inherit(),
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -204,10 +213,9 @@ fn command_output_with_stdin(
         .ok_or_else(|| cli_error(context, "", Some("missing stderr pipe".to_string()), false))?;
     let stdout_reader = read_stream(stdout);
     let stderr_reader = read_stream(stderr);
-    let (stdout_reader, stderr_reader) = if input.is_empty() {
-        (stdout_reader, stderr_reader)
-    } else {
-        write_child_stdin(&mut child, input, context, stdout_reader, stderr_reader)?
+    let (stdout_reader, stderr_reader) = match input {
+        Some(input) => write_child_stdin(&mut child, input, context, stdout_reader, stderr_reader)?,
+        None => (stdout_reader, stderr_reader),
     };
     wait_for_child(child, deadline, context, stdout_reader, stderr_reader)
 }

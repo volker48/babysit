@@ -1,6 +1,6 @@
 use std::io::{self, IsTerminal, Read};
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::forge::{CliError, run_json, run_json_pages, run_json_with_stdin};
 
@@ -158,37 +158,89 @@ fn parse_hook(value: &Value) -> Result<Hook, CliError> {
     let object = value
         .as_object()
         .ok_or_else(|| malformed_hook("hook is not an object"))?;
-    let id = object
-        .get("id")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| malformed_hook("hook id is missing or invalid"))?;
-    let name = object
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| malformed_hook("hook name is missing or invalid"))?;
-    let active = object
-        .get("active")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| malformed_hook("hook active state is missing or invalid"))?;
-    let config = object
-        .get("config")
-        .and_then(Value::as_object)
-        .ok_or_else(|| malformed_hook("hook config is missing or invalid"))?;
-    let url = config
-        .get("url")
-        .and_then(Value::as_str)
-        .ok_or_else(|| malformed_hook("hook URL is missing or invalid"))?;
-    let content_type = config
-        .get("content_type")
-        .and_then(Value::as_str)
-        .ok_or_else(|| malformed_hook("hook content type is missing or invalid"))?;
-    let insecure_ssl = config
-        .get("insecure_ssl")
-        .and_then(Value::as_str)
-        .ok_or_else(|| malformed_hook("hook insecure SSL value is missing or invalid"))?;
-    let events = object
-        .get("events")
-        .and_then(Value::as_array)
+    let id = required_u64(object, "id", "hook id is missing or invalid")?;
+    let name = required_string(object, "name", "hook name is missing or invalid")?;
+    let active = required_bool(object, "active", "hook active state is missing or invalid")?;
+    let config = required_object(object, "config", "hook config is missing or invalid")?;
+    let url = required_string(config, "url", "hook URL is missing or invalid")?;
+    let content_type = required_string(
+        config,
+        "content_type",
+        "hook content type is missing or invalid",
+    )?;
+    let insecure_ssl = parse_insecure_ssl(required_field(
+        config,
+        "insecure_ssl",
+        "hook insecure SSL value is missing or invalid",
+    )?)?;
+    let events = parse_events(required_field(
+        object,
+        "events",
+        "hook events are missing or invalid",
+    )?)?;
+    Ok(Hook {
+        id,
+        name,
+        active,
+        url,
+        content_type,
+        insecure_ssl,
+        events,
+    })
+}
+
+fn required_field<'a>(
+    object: &'a Map<String, Value>,
+    key: &str,
+    message: &str,
+) -> Result<&'a Value, CliError> {
+    object.get(key).ok_or_else(|| malformed_hook(message))
+}
+
+fn required_u64(object: &Map<String, Value>, key: &str, message: &str) -> Result<u64, CliError> {
+    required_field(object, key, message)?
+        .as_u64()
+        .ok_or_else(|| malformed_hook(message))
+}
+
+fn required_bool(object: &Map<String, Value>, key: &str, message: &str) -> Result<bool, CliError> {
+    required_field(object, key, message)?
+        .as_bool()
+        .ok_or_else(|| malformed_hook(message))
+}
+
+fn required_string(
+    object: &Map<String, Value>,
+    key: &str,
+    message: &str,
+) -> Result<String, CliError> {
+    required_field(object, key, message)?
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| malformed_hook(message))
+}
+
+fn required_object<'a>(
+    object: &'a Map<String, Value>,
+    key: &str,
+    message: &str,
+) -> Result<&'a Map<String, Value>, CliError> {
+    required_field(object, key, message)?
+        .as_object()
+        .ok_or_else(|| malformed_hook(message))
+}
+
+fn parse_insecure_ssl(value: &Value) -> Result<String, CliError> {
+    value
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| value.as_number().map(ToString::to_string))
+        .ok_or_else(|| malformed_hook("hook insecure SSL value is missing or invalid"))
+}
+
+fn parse_events(value: &Value) -> Result<Vec<String>, CliError> {
+    value
+        .as_array()
         .ok_or_else(|| malformed_hook("hook events are missing or invalid"))?
         .iter()
         .map(|event| {
@@ -197,16 +249,7 @@ fn parse_hook(value: &Value) -> Result<Hook, CliError> {
                 .map(str::to_string)
                 .ok_or_else(|| malformed_hook("hook event is invalid"))
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(Hook {
-        id,
-        name: name.to_string(),
-        active,
-        url: url.to_string(),
-        content_type: content_type.to_string(),
-        insecure_ssl: insecure_ssl.to_string(),
-        events,
-    })
+        .collect()
 }
 
 fn malformed_hook(message: &str) -> CliError {
@@ -292,13 +335,24 @@ fn mutation_args(repo: &str, mutation: Mutation) -> Vec<String> {
 }
 
 fn mutation_error(error: CliError, secret: &WebhookSecret) -> CliError {
-    let detail = error.message.replace(secret.expose(), "[redacted]");
+    let detail = redact_secret(&error.message, secret);
     CliError::new(
-        format!(
-            "gh webhook mutation failed: {detail}; state may have changed; rerunning this idempotent command is safe"
-        ),
+        format!("gh webhook mutation failed: {detail}; state may have changed; ")
+            + "rerunning this idempotent command is safe",
         true,
     )
+}
+
+fn redact_secret(message: &str, secret: &WebhookSecret) -> String {
+    let escaped = serde_json::to_string(secret.expose()).expect("secret strings are serializable");
+    let escaped_body = escaped
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(&escaped);
+    message
+        .replace(secret.expose(), "[redacted]")
+        .replace(escaped_body, "[redacted]")
+        .replace(&escaped, "[redacted]")
 }
 
 fn verify_reconciliation(hooks: &[Hook]) -> Result<(), CliError> {
@@ -321,7 +375,21 @@ fn verify_reconciliation(hooks: &[Hook]) -> Result<(), CliError> {
 }
 
 fn expected_state(hook: &Hook) -> bool {
-    hook.active && hook.content_type == "json" && hook.insecure_ssl == "0" && hook.events == EVENTS
+    hook.active
+        && hook.content_type == "json"
+        && hook.insecure_ssl == "0"
+        && events_match(&hook.events)
+}
+
+fn events_match(events: &[String]) -> bool {
+    if events.len() != EVENTS.len() {
+        return false;
+    }
+    let mut actual = events.to_vec();
+    actual.sort_unstable();
+    let mut expected = EVENTS.map(str::to_string);
+    expected.sort_unstable();
+    actual == expected
 }
 
 fn reconciliation_error(reason: &str) -> CliError {
