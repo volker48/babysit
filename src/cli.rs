@@ -13,6 +13,9 @@ use crate::forge::{
     CliError, ForgeName, ForgeProvider, SnapshotFetchOptions, UsageError, auto_detect_forge,
 };
 use crate::github::create_github_provider;
+use crate::github_webhook::{
+    ProcessGh, SetupAction, read_webhook_secret, setup_webhook, validate_repository,
+};
 use crate::gitlab::create_gitlab_provider;
 use crate::wait::{PollingWakeSource, WaitOutcome, WakeSource, wait_until_settled};
 
@@ -22,6 +25,7 @@ pub enum CommandName {
     Findings,
     Wait,
     GatewayToken,
+    GatewayWebhook,
     Help,
     Version,
 }
@@ -32,6 +36,11 @@ pub enum GatewayTokenAction {
     Status,
     Delete,
     Rotate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayWebhookAction {
+    Setup,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +58,7 @@ pub struct CliOptions {
     pub events: bool,
     pub gateway_url: Option<String>,
     pub gateway_token_action: Option<GatewayTokenAction>,
+    pub gateway_webhook_action: Option<GatewayWebhookAction>,
 }
 
 struct ParseState {
@@ -80,6 +90,9 @@ pub fn parse_args(argv: &[String]) -> Result<CliOptions, UsageError> {
     if command == CommandName::GatewayToken {
         return parse_gateway_token_args(argv);
     }
+    if command == CommandName::GatewayWebhook {
+        return parse_gateway_webhook_args(argv);
+    }
     let mut state = ParseState {
         opts: default_options(command),
         wait_flag_used: false,
@@ -99,6 +112,7 @@ fn parse_command(value: Option<&str>) -> Result<CommandName, UsageError> {
         Some("findings") => Ok(CommandName::Findings),
         Some("wait") => Ok(CommandName::Wait),
         Some("gateway-token") => Ok(CommandName::GatewayToken),
+        Some("gateway-webhook") => Ok(CommandName::GatewayWebhook),
         Some("--help" | "-h" | "help") => Ok(CommandName::Help),
         Some("--version" | "-V") => Ok(CommandName::Version),
         Some(value) => Err(UsageError::new(format!("unknown subcommand: {value}"))),
@@ -111,8 +125,12 @@ fn is_command_help(argv: &[String]) -> bool {
         && matches!(argv[1].as_str(), "--help" | "-h")
         && matches!(
             argv[0].as_str(),
-            "status" | "findings" | "wait" | "gateway-token"
+            "status" | "findings" | "wait" | "gateway-token" | "gateway-webhook"
         )
+        || (argv.len() == 3
+            && argv[0] == "gateway-webhook"
+            && argv[1] == "setup"
+            && matches!(argv[2].as_str(), "--help" | "-h"))
 }
 
 fn default_options(command: CommandName) -> CliOptions {
@@ -130,6 +148,7 @@ fn default_options(command: CommandName) -> CliOptions {
         events: false,
         gateway_url: None,
         gateway_token_action: None,
+        gateway_webhook_action: None,
     }
 }
 
@@ -251,6 +270,44 @@ fn parse_gateway_token_args(argv: &[String]) -> Result<CliOptions, UsageError> {
     Ok(options)
 }
 
+fn parse_gateway_webhook_args(argv: &[String]) -> Result<CliOptions, UsageError> {
+    if argv.get(1).map(String::as_str) != Some("setup") {
+        return Err(UsageError::new(
+            "gateway-webhook requires exactly one action: setup",
+        ));
+    }
+    let mut options = default_options(CommandName::GatewayWebhook);
+    options.gateway_webhook_action = Some(GatewayWebhookAction::Setup);
+    let mut index = 2;
+    while index < argv.len() {
+        let arg = &argv[index];
+        let (flag, inline) = inline_value(arg).unwrap_or((arg, ""));
+        if flag != "--repo" && flag != "-R" {
+            return Err(UsageError::new(format!(
+                "unknown gateway-webhook setup flag or argument: {arg}"
+            )));
+        }
+        let value = if inline.is_empty() {
+            required_value(argv, index, arg)?
+        } else {
+            inline.to_string()
+        };
+        let value = non_empty(&value, "--repo")?;
+        validate_repository(&value).map_err(UsageError::new)?;
+        if options.repo.is_some() {
+            return Err(UsageError::new("gateway-webhook setup accepts one --repo"));
+        }
+        options.repo = Some(value);
+        index += if inline.is_empty() { 2 } else { 1 };
+    }
+    if options.repo.is_none() {
+        return Err(UsageError::new(
+            "gateway-webhook setup requires --repo OWNER/REPOSITORY",
+        ));
+    }
+    Ok(options)
+}
+
 fn validate_wait_options(state: &mut ParseState) -> Result<(), UsageError> {
     if state.wait_flag_used && state.opts.command != CommandName::Wait {
         return Err(UsageError::new(
@@ -338,6 +395,7 @@ fn run_inner(argv: &[String]) -> Result<i32, RunError> {
         CommandName::Findings => run_findings(&opts).map_err(RunError::Cli),
         CommandName::Wait => run_wait(&opts).map_err(RunError::Cli),
         CommandName::GatewayToken => run_gateway_token(&opts).map_err(RunError::Cli),
+        CommandName::GatewayWebhook => run_gateway_webhook(&opts).map_err(RunError::Cli),
         CommandName::Help => {
             println!("{}", usage());
             Ok(0)
@@ -347,6 +405,19 @@ fn run_inner(argv: &[String]) -> Result<i32, RunError> {
             Ok(0)
         }
     }
+}
+
+fn run_gateway_webhook(opts: &CliOptions) -> Result<i32, CliError> {
+    let secret = read_webhook_secret()?;
+    let mut gh = ProcessGh;
+    let repo = opts.repo.as_deref().expect("webhook repository was parsed");
+    let result = setup_webhook(repo, &secret, &mut gh)?;
+    let action = match result.action {
+        SetupAction::Created => "created",
+        SetupAction::Updated => "updated",
+    };
+    println!("GitHub webhook {action} for {repo}");
+    Ok(0)
 }
 
 fn run_gateway_token(opts: &CliOptions) -> Result<i32, CliError> {
@@ -510,6 +581,7 @@ pub fn usage() -> String {
         "       babysit findings [<pr>] [options]",
         "       babysit wait [<pr>] [options]",
         "       babysit gateway-token <enroll|status|delete|rotate>",
+        "       babysit gateway-webhook setup --repo <owner/repo>",
         "       babysit --help",
         "       babysit --version",
         "Options:",
