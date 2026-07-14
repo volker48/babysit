@@ -72,13 +72,13 @@ Options:
 -R, --repo <owner/repo>  Repository to inspect
 --forge <github|gitlab>  Default: auto-detect from git origin
 --bots <csv>             Bot logins to treat as reviewers
---all                    Include resolved and outdated findings
+--all                    findings/wait only; include resolved and outdated findings
 --nitpicks               Include CodeRabbit nitpick review-body findings
---no-reviews             Settle without waiting for a bot review
+--no-reviews             status/wait only; settle without waiting for a bot review
 --timeout <secs>         wait only; overall deadline, default 1800
 --interval <secs>        wait only; default 30 (event fallback default 300)
 --events                 wait only; opt in to GitHub event-assisted wakes
---gateway-url <wss-url>  required with --events; exact non-secret wss://host/watch base URL
+--gateway-url <wss-url>  wait only; required with --events; exact non-secret wss://host/watch base URL
 -h, --help               Show help without contacting a forge
 -V, --version            Show the installed version
 ```

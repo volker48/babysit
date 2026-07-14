@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+use clap::{Args, Parser, Subcommand};
+
 const MAX_WAIT_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 use crate::bots::DEFAULT_BOTS;
@@ -16,7 +18,7 @@ use crate::github::create_github_provider;
 use crate::gitlab::create_gitlab_provider;
 use crate::wait::{PollingWakeSource, WaitOutcome, WakeSource, wait_until_settled};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandName {
     Status,
     Findings,
@@ -26,11 +28,15 @@ pub enum CommandName {
     Version,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
 pub enum GatewayTokenAction {
+    /// Create a gateway token.
     Enroll,
+    /// Report whether a gateway token is configured.
     Status,
+    /// Remove the configured gateway token.
     Delete,
+    /// Replace the gateway token.
     Rotate,
 }
 
@@ -49,70 +55,174 @@ pub struct CliOptions {
     pub events: bool,
     pub gateway_url: Option<String>,
     pub gateway_token_action: Option<GatewayTokenAction>,
+    display: Option<String>,
 }
 
-struct ParseState {
-    opts: CliOptions,
-    wait_flag_used: bool,
-    interval_explicit: bool,
+/// Watch pull requests and merge requests until checks and bot reviews settle.
+#[derive(Debug, Parser)]
+#[command(name = "babysit", version, subcommand_required = true)]
+struct Cli {
+    #[command(subcommand)]
+    command: CliCommand,
 }
 
-enum ValueFlag {
-    Repo,
-    Bots,
-    TimeoutSecs,
-    IntervalSecs,
-    Forge,
-    GatewayUrl,
+#[derive(Debug, Subcommand)]
+enum CliCommand {
+    /// Fetch and print the current status.
+    Status(StatusArgs),
+    /// Fetch and print unresolved review findings.
+    Findings(FindingsArgs),
+    /// Wait until checks and configured bot reviews settle.
+    Wait(WaitArgs),
+    /// Manage the gateway authentication token.
+    #[command(name = "gateway-token")]
+    GatewayToken {
+        #[command(subcommand)]
+        action: GatewayTokenAction,
+    },
+}
+
+#[derive(Debug, Args)]
+struct CommonArgs {
+    /// Pull request or merge request number.
+    #[arg(value_name = "PR", value_parser = parse_pr)]
+    pr: Option<String>,
+    /// Repository to inspect, in OWNER/REPO form.
+    #[arg(short = 'R', long, value_parser = parse_repo)]
+    repo: Option<String>,
+    /// Comma-separated bot logins to treat as reviewers.
+    #[arg(long, value_parser = parse_bots_arg)]
+    bots: Option<BotList>,
+    /// Forge to use instead of auto-detection.
+    #[arg(long, value_parser = parse_forge_arg)]
+    forge: Option<ForgeName>,
+}
+
+#[derive(Debug, Args)]
+struct StatusArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+    /// Include CodeRabbit nitpick review-body findings.
+    #[arg(long)]
+    nitpicks: bool,
+    /// Settle without waiting for a matching bot review.
+    #[arg(long)]
+    no_reviews: bool,
+}
+
+#[derive(Debug, Args)]
+struct FindingsArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+    /// Include resolved and outdated findings.
+    #[arg(long)]
+    all: bool,
+    /// Include CodeRabbit nitpick review-body findings.
+    #[arg(long)]
+    nitpicks: bool,
+}
+
+#[derive(Debug, Args)]
+struct WaitArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+    /// Include resolved and outdated findings.
+    #[arg(long)]
+    all: bool,
+    /// Include CodeRabbit nitpick review-body findings.
+    #[arg(long)]
+    nitpicks: bool,
+    /// Settle without waiting for a matching bot review.
+    #[arg(long)]
+    no_reviews: bool,
+    /// Overall wait deadline in seconds.
+    #[arg(
+        long = "timeout",
+        default_value_t = 1800,
+        value_parser = parse_seconds
+    )]
+    timeout_secs: u64,
+    /// Polling interval in seconds; event mode defaults to 300.
+    #[arg(long = "interval", value_parser = parse_seconds)]
+    interval_secs: Option<u64>,
+    /// Use GitHub gateway events instead of only polling.
+    #[arg(long, requires = "gateway_url")]
+    events: bool,
+    /// Gateway WebSocket URL used by event mode.
+    #[arg(long, requires = "events", value_parser = parse_gateway_url)]
+    gateway_url: Option<String>,
 }
 
 pub fn parse_args(argv: &[String]) -> Result<CliOptions, UsageError> {
-    if is_command_help(argv) {
-        return Ok(default_options(CommandName::Help));
+    let args = std::iter::once("babysit".to_string()).chain(argv.iter().cloned());
+    match Cli::try_parse_from(args) {
+        Ok(cli) => Ok(cli.into_options()),
+        Err(error) => match error.kind() {
+            clap::error::ErrorKind::DisplayHelp => {
+                Ok(display_options(CommandName::Help, error.to_string()))
+            }
+            clap::error::ErrorKind::DisplayVersion => {
+                Ok(display_options(CommandName::Version, error.to_string()))
+            }
+            _ => Err(UsageError::new(error.to_string())),
+        },
     }
-    let command = parse_command(argv.first().map(String::as_str))?;
-    if matches!(command, CommandName::Help | CommandName::Version) {
-        if argv.len() > 1 {
-            return Err(UsageError::new("unexpected arguments"));
+}
+
+impl Cli {
+    fn into_options(self) -> CliOptions {
+        match self.command {
+            CliCommand::Status(args) => {
+                let mut options = options_from_common(CommandName::Status, args.common);
+                options.nitpicks = args.nitpicks;
+                options.no_reviews = args.no_reviews;
+                options
+            }
+            CliCommand::Findings(args) => {
+                let mut options = options_from_common(CommandName::Findings, args.common);
+                options.all = args.all;
+                options.nitpicks = args.nitpicks;
+                options
+            }
+            CliCommand::Wait(args) => {
+                let mut options = options_from_common(CommandName::Wait, args.common);
+                options.all = args.all;
+                options.nitpicks = args.nitpicks;
+                options.no_reviews = args.no_reviews;
+                options.timeout_secs = args.timeout_secs;
+                options.interval_secs =
+                    args.interval_secs
+                        .unwrap_or(if args.events { 300 } else { 30 });
+                options.events = args.events;
+                options.gateway_url = args.gateway_url;
+                options
+            }
+            CliCommand::GatewayToken { action } => {
+                let mut options = default_options(CommandName::GatewayToken);
+                options.gateway_token_action = Some(action);
+                options
+            }
         }
-        return Ok(default_options(command));
-    }
-    if command == CommandName::GatewayToken {
-        return parse_gateway_token_args(argv);
-    }
-    let mut state = ParseState {
-        opts: default_options(command),
-        wait_flag_used: false,
-        interval_explicit: false,
-    };
-    let mut index = 1;
-    while index < argv.len() {
-        index = consume_token(argv, index, &mut state)?;
-    }
-    validate_wait_options(&mut state)?;
-    Ok(state.opts)
-}
-
-fn parse_command(value: Option<&str>) -> Result<CommandName, UsageError> {
-    match value {
-        Some("status") => Ok(CommandName::Status),
-        Some("findings") => Ok(CommandName::Findings),
-        Some("wait") => Ok(CommandName::Wait),
-        Some("gateway-token") => Ok(CommandName::GatewayToken),
-        Some("--help" | "-h" | "help") => Ok(CommandName::Help),
-        Some("--version" | "-V") => Ok(CommandName::Version),
-        Some(value) => Err(UsageError::new(format!("unknown subcommand: {value}"))),
-        None => Err(UsageError::new("missing subcommand")),
     }
 }
 
-fn is_command_help(argv: &[String]) -> bool {
-    argv.len() == 2
-        && matches!(argv[1].as_str(), "--help" | "-h")
-        && matches!(
-            argv[0].as_str(),
-            "status" | "findings" | "wait" | "gateway-token"
-        )
+fn options_from_common(command: CommandName, common: CommonArgs) -> CliOptions {
+    CliOptions {
+        command,
+        pr: common.pr,
+        repo: common.repo,
+        bots: common.bots.map(|bots| bots.0).unwrap_or_else(default_bots),
+        forge: common.forge,
+        all: false,
+        nitpicks: false,
+        no_reviews: false,
+        timeout_secs: 1800,
+        interval_secs: 30,
+        events: false,
+        gateway_url: None,
+        gateway_token_action: None,
+        display: None,
+    }
 }
 
 fn default_options(command: CommandName) -> CliOptions {
@@ -120,7 +230,7 @@ fn default_options(command: CommandName) -> CliOptions {
         command,
         pr: None,
         repo: None,
-        bots: DEFAULT_BOTS.iter().map(|s| s.to_string()).collect(),
+        bots: default_bots(),
         forge: None,
         all: false,
         nitpicks: false,
@@ -130,155 +240,45 @@ fn default_options(command: CommandName) -> CliOptions {
         events: false,
         gateway_url: None,
         gateway_token_action: None,
+        display: None,
     }
 }
 
-fn consume_token(
-    argv: &[String],
-    index: usize,
-    state: &mut ParseState,
-) -> Result<usize, UsageError> {
-    let arg = &argv[index];
-    if assign_bool_flag(arg, state) {
-        return Ok(index + 1);
-    }
-    if let Some((flag, value)) = inline_value(arg) {
-        if let Some(value_flag) = value_flag(flag) {
-            assign_value(state, value_flag, value)?;
-            return Ok(index + 1);
-        }
-    }
-    if let Some(value_flag) = value_flag(arg) {
-        assign_value(state, value_flag, &required_value(argv, index, arg)?)?;
-        return Ok(index + 2);
-    }
-    if arg.starts_with('-') {
-        return Err(UsageError::new(format!("unknown flag: {arg}")));
-    }
-    assign_pr(&mut state.opts, arg)?;
-    Ok(index + 1)
+fn display_options(command: CommandName, display: String) -> CliOptions {
+    let mut options = default_options(command);
+    options.display = Some(display);
+    options
 }
 
-fn assign_bool_flag(arg: &str, state: &mut ParseState) -> bool {
-    match arg {
-        "--all" => state.opts.all = true,
-        "--nitpicks" => state.opts.nitpicks = true,
-        "--no-reviews" => state.opts.no_reviews = true,
-        "--events" => {
-            state.opts.events = true;
-            state.wait_flag_used = true;
-        }
-        _ => return false,
-    }
-    true
+fn default_bots() -> Vec<String> {
+    DEFAULT_BOTS.iter().map(|bot| (*bot).to_string()).collect()
 }
 
-fn inline_value(arg: &str) -> Option<(&str, &str)> {
-    if !arg.starts_with("--") {
-        return None;
-    }
-    let index = arg.find('=')?;
-    Some((&arg[..index], &arg[index + 1..]))
-}
-
-fn value_flag(flag: &str) -> Option<ValueFlag> {
-    match flag {
-        "--repo" | "-R" => Some(ValueFlag::Repo),
-        "--bots" => Some(ValueFlag::Bots),
-        "--forge" => Some(ValueFlag::Forge),
-        "--timeout" => Some(ValueFlag::TimeoutSecs),
-        "--interval" => Some(ValueFlag::IntervalSecs),
-        "--gateway-url" => Some(ValueFlag::GatewayUrl),
-        _ => None,
+fn parse_pr(value: &str) -> Result<String, String> {
+    if !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()) {
+        Ok(value.to_string())
+    } else {
+        Err(format!("invalid PR number: {value}"))
     }
 }
 
-fn required_value(argv: &[String], index: usize, flag: &str) -> Result<String, UsageError> {
-    match argv.get(index + 1) {
-        Some(value) if !value.starts_with('-') => Ok(value.clone()),
-        _ => Err(UsageError::new(format!("{flag} requires a value"))),
-    }
-}
-
-fn assign_pr(opts: &mut CliOptions, value: &str) -> Result<(), UsageError> {
-    if !value.chars().all(|ch| ch.is_ascii_digit()) {
-        return Err(UsageError::new(format!("invalid PR number: {value}")));
-    }
-    if opts.pr.is_some() {
-        return Err(UsageError::new(format!(
-            "unexpected positional argument: {value}"
-        )));
-    }
-    opts.pr = Some(value.to_string());
-    Ok(())
-}
-
-fn assign_value(state: &mut ParseState, flag: ValueFlag, value: &str) -> Result<(), UsageError> {
-    match flag {
-        ValueFlag::Repo => state.opts.repo = Some(non_empty(value, "--repo")?),
-        ValueFlag::Bots => state.opts.bots = parse_bots(value)?,
-        ValueFlag::Forge => state.opts.forge = Some(parse_forge(value)?),
-        ValueFlag::TimeoutSecs => {
-            state.opts.timeout_secs = parse_seconds(state, value, "--timeout")?
-        }
-        ValueFlag::IntervalSecs => {
-            state.opts.interval_secs = parse_seconds(state, value, "--interval")?;
-            state.interval_explicit = true;
-        }
-        ValueFlag::GatewayUrl => {
-            state.opts.gateway_url = Some(non_empty(value, "--gateway-url")?);
-            state.wait_flag_used = true;
-        }
-    }
-    Ok(())
-}
-
-fn parse_gateway_token_args(argv: &[String]) -> Result<CliOptions, UsageError> {
-    if argv.len() != 2 {
-        return Err(UsageError::new(
-            "gateway-token requires exactly one action: enroll, status, delete, or rotate",
-        ));
-    }
-    let action = match argv[1].as_str() {
-        "enroll" => GatewayTokenAction::Enroll,
-        "status" => GatewayTokenAction::Status,
-        "delete" => GatewayTokenAction::Delete,
-        "rotate" => GatewayTokenAction::Rotate,
-        _ => return Err(UsageError::new("unknown gateway-token action")),
-    };
-    let mut options = default_options(CommandName::GatewayToken);
-    options.gateway_token_action = Some(action);
-    Ok(options)
-}
-
-fn validate_wait_options(state: &mut ParseState) -> Result<(), UsageError> {
-    if state.wait_flag_used && state.opts.command != CommandName::Wait {
-        return Err(UsageError::new(
-            "--timeout, --interval, --events, and --gateway-url are only valid with wait",
-        ));
-    }
-    if state.opts.gateway_url.is_some() && !state.opts.events {
-        return Err(UsageError::new("--gateway-url requires --events"));
-    }
-    if state.opts.events && state.opts.gateway_url.is_none() {
-        return Err(UsageError::new("--events requires --gateway-url <wss-url>"));
-    }
-    if state.opts.events && !state.interval_explicit {
-        state.opts.interval_secs = 300;
-    }
-    Ok(())
-}
-
-fn non_empty(value: &str, flag: &str) -> Result<String, UsageError> {
+fn parse_repo(value: &str) -> Result<String, String> {
     let trimmed = value.trim();
-    if trimmed.is_empty() {
-        Err(UsageError::new(format!("{flag} requires a value")))
+    if trimmed.is_empty() || trimmed.starts_with('-') {
+        Err("--repo requires a non-empty value not starting with '-'".to_string())
     } else {
         Ok(trimmed.to_string())
     }
 }
 
-fn parse_bots(value: &str) -> Result<Vec<String>, UsageError> {
+#[derive(Debug, Clone)]
+struct BotList(Vec<String>);
+
+fn parse_bots_arg(value: &str) -> Result<BotList, String> {
+    parse_bots(value).map(BotList)
+}
+
+fn parse_bots(value: &str) -> Result<Vec<String>, String> {
     let bots: Vec<String> = value
         .split(',')
         .map(str::trim)
@@ -286,29 +286,35 @@ fn parse_bots(value: &str) -> Result<Vec<String>, UsageError> {
         .map(str::to_string)
         .collect();
     if bots.is_empty() {
-        return Err(UsageError::new("--bots requires at least one bot"));
+        Err("--bots requires at least one bot".to_string())
+    } else {
+        Ok(bots)
     }
-    Ok(bots)
 }
 
-fn parse_forge(value: &str) -> Result<ForgeName, UsageError> {
+fn parse_forge_arg(value: &str) -> Result<ForgeName, String> {
     match value {
         "github" => Ok(ForgeName::GitHub),
         "gitlab" => Ok(ForgeName::GitLab),
-        _ => Err(UsageError::new("--forge must be github or gitlab")),
+        _ => Err("--forge must be github or gitlab".to_string()),
     }
 }
 
-fn parse_seconds(state: &mut ParseState, value: &str, flag: &str) -> Result<u64, UsageError> {
-    state.wait_flag_used = true;
+fn parse_seconds(value: &str) -> Result<u64, String> {
     match value.parse::<u64>() {
         Ok(seconds) if seconds > 0 && seconds <= MAX_WAIT_SECONDS => Ok(seconds),
-        Ok(_) => Err(UsageError::new(format!(
-            "{flag} must be between 1 and {MAX_WAIT_SECONDS} seconds"
-        ))),
-        Err(_) => Err(UsageError::new(format!(
-            "{flag} must be a positive integer number of seconds"
-        ))),
+        Ok(_) => Err(format!(
+            "value must be between 1 and {MAX_WAIT_SECONDS} seconds"
+        )),
+        Err(_) => Err("value must be a positive integer number of seconds".to_string()),
+    }
+}
+
+fn parse_gateway_url(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        Err("--gateway-url requires a value".to_string())
+    } else {
+        Ok(value.trim().to_string())
     }
 }
 
@@ -316,7 +322,7 @@ pub fn run(argv: &[String]) -> i32 {
     match run_inner(argv) {
         Ok(code) => code,
         Err(RunError::Usage(error)) => {
-            eprintln!("{}\n{}", error.0.message, usage());
+            eprintln!("{}", error.0.message);
             error.0.exit_code
         }
         Err(RunError::Cli(error)) => {
@@ -338,12 +344,14 @@ fn run_inner(argv: &[String]) -> Result<i32, RunError> {
         CommandName::Findings => run_findings(&opts).map_err(RunError::Cli),
         CommandName::Wait => run_wait(&opts).map_err(RunError::Cli),
         CommandName::GatewayToken => run_gateway_token(&opts).map_err(RunError::Cli),
-        CommandName::Help => {
-            println!("{}", usage());
-            Ok(0)
-        }
-        CommandName::Version => {
-            println!("babysit {}", env!("CARGO_PKG_VERSION"));
+        CommandName::Help | CommandName::Version => {
+            println!(
+                "{}",
+                opts.display
+                    .as_deref()
+                    .expect("display output was parsed")
+                    .trim_end()
+            );
             Ok(0)
         }
     }
@@ -502,29 +510,4 @@ fn fetch_snapshot_for(
         ForgeName::GitLab => create_gitlab_provider().fetch_snapshot(&fetch_opts),
         ForgeName::GitHub => create_github_provider().fetch_snapshot(&fetch_opts),
     }
-}
-
-pub fn usage() -> String {
-    [
-        "Usage: babysit status [<pr>] [options]",
-        "       babysit findings [<pr>] [options]",
-        "       babysit wait [<pr>] [options]",
-        "       babysit gateway-token <enroll|status|delete|rotate>",
-        "       babysit --help",
-        "       babysit --version",
-        "Options:",
-        "  -R, --repo <owner/repo>",
-        "  --forge <github|gitlab>  default: auto (origin host containing gitlab => gitlab)",
-        "  --bots <csv>",
-        "  --all",
-        "  --nitpicks",
-        "  --no-reviews",
-        "  --timeout <secs>        wait only (default 1800)",
-        "  --interval <secs>       wait only (default 30; event fallback default 300)",
-        "  --events                 wait only; requires --gateway-url",
-        "  --gateway-url <wss-url>  event mode only",
-        "  -h, --help              show help",
-        "  -V, --version           show version",
-    ]
-    .join("\n")
 }
