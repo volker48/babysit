@@ -111,6 +111,14 @@ struct ChildStreams {
 }
 
 impl ChildStreams {
+    fn is_finished(&self) -> bool {
+        self.input_writer
+            .as_ref()
+            .is_none_or(JoinHandle::is_finished)
+            && self.stdout_reader.is_finished()
+            && self.stderr_reader.is_finished()
+    }
+
     fn join(self, context: &str) -> Result<(Vec<u8>, Vec<u8>), CliError> {
         let input_error = self
             .input_writer
@@ -124,7 +132,9 @@ impl ChildStreams {
     }
 
     fn discard(self, context: &str) {
-        let _ = self.join(context);
+        if self.is_finished() {
+            let _ = self.join(context);
+        }
     }
 }
 
@@ -278,14 +288,26 @@ fn wait_for_child(
     context: &str,
     streams: ChildStreams,
 ) -> Result<Output, CliError> {
+    let mut status = None;
     loop {
         if Instant::now() >= deadline {
             terminate_child(&mut child);
             streams.discard(context);
             return Err(timeout_error(context));
         }
-        match child.try_wait() {
-            Ok(Some(status)) => {
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(Some(exit_status)) => status = Some(exit_status),
+                Ok(None) => {}
+                Err(error) => {
+                    terminate_child(&mut child);
+                    streams.discard(context);
+                    return Err(cli_error(context, "", Some(error.to_string()), false));
+                }
+            }
+        }
+        if streams.is_finished() {
+            if let Some(status) = status {
                 let (stdout, stderr) = streams.join(context)?;
                 return Ok(Output {
                     status,
@@ -293,13 +315,8 @@ fn wait_for_child(
                     stderr,
                 });
             }
-            Ok(None) => sleep(Duration::from_millis(50)),
-            Err(error) => {
-                terminate_child(&mut child);
-                streams.discard(context);
-                return Err(cli_error(context, "", Some(error.to_string()), false));
-            }
         }
+        sleep(Duration::from_millis(50));
     }
 }
 
@@ -507,5 +524,32 @@ mod tests {
         );
         assert!(error.retryable);
         assert!(error.message.contains("operation timed out"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descendant_held_pipes_do_not_delay_cleanup_past_deadline() {
+        for script in ["sleep 2 & exit 0", "sleep 2 & wait"] {
+            let args = ["-c".to_string(), script.to_string()];
+            let input = vec![b'x'; 1024 * 1024];
+            let deadline = Instant::now() + Duration::from_millis(100);
+            let started = Instant::now();
+
+            let error = run_json_with_stdin_deadline(
+                "sh",
+                &args,
+                "descendant pipe test",
+                &input,
+                Some(deadline),
+            )
+            .unwrap_err();
+
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "cleanup exceeded the deadline for `{script}`: {error}"
+            );
+            assert!(error.retryable);
+            assert!(error.message.contains("operation timed out"));
+        }
     }
 }
