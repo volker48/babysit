@@ -1,3 +1,6 @@
+pub mod github;
+pub mod gitlab;
+
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::process::{Command, Output, Stdio};

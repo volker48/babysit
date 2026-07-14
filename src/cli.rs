@@ -11,14 +11,14 @@ use crate::core::{
 };
 use crate::credentials::{production_store, read_token};
 use crate::event::EventWakeSource;
+use crate::forge::github::create_github_provider;
+use crate::forge::gitlab::create_gitlab_provider;
 use crate::forge::{
     CliError, ForgeName, ForgeProvider, SnapshotFetchOptions, UsageError, auto_detect_forge,
 };
-use crate::github::create_github_provider;
 use crate::github_webhook::{
     ProcessGh, SetupAction, read_webhook_secret, setup_webhook, validate_repository,
 };
-use crate::gitlab::create_gitlab_provider;
 use crate::wait::{PollingWakeSource, WaitOutcome, WakeSource, wait_until_settled};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

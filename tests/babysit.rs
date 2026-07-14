@@ -8,15 +8,15 @@ use babysit::core::{
     evaluate_settled, exit_code_for, hoist_shared_preamble, render_findings, render_status,
     unresolved_findings,
 };
-use babysit::forge::{collect_json_pages, run_json_deadline, run_json_pages};
-use babysit::github::{
+use babysit::forge::github::{
     REVIEW_QUERY, collect_review_pages, parse_pr_view, parse_review_data,
     parse_review_data_for_head,
 };
-use babysit::gitlab::{
+use babysit::forge::gitlab::{
     parse_gitlab_bot_reviews, parse_gitlab_findings, parse_gitlab_findings_for_head,
     parse_gitlab_jobs, parse_gitlab_mr,
 };
+use babysit::forge::{collect_json_pages, run_json_deadline, run_json_pages};
 
 #[test]
 fn expired_command_deadline_does_not_start_a_subprocess() {
