@@ -1,6 +1,6 @@
 [package]
 name = "babysit"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2024"
 description = "Watch pull requests and merge requests for CI status and bot review findings."
 license = "MIT"
