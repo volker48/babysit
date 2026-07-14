@@ -1,9 +1,31 @@
 use babysit::bots::DEFAULT_BOTS;
-use babysit::cli::{CommandName, parse_args};
+use babysit::cli::{CliOptions, CommandName, parse_args};
 use babysit::forge::{ForgeName, detect_forge_from_remote_url};
 
 fn args(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| value.to_string()).collect()
+}
+
+#[test]
+fn cli_options_remains_constructible_through_its_public_fields() {
+    let options = CliOptions {
+        command: CommandName::Status,
+        pr: None,
+        repo: None,
+        bots: Vec::new(),
+        forge: None,
+        all: false,
+        nitpicks: false,
+        no_reviews: false,
+        timeout_secs: 1800,
+        interval_secs: 30,
+        events: false,
+        gateway_url: None,
+        gateway_token_action: None,
+        gateway_webhook_action: None,
+    };
+
+    assert_eq!(options.command, CommandName::Status);
 }
 
 #[test]
@@ -146,7 +168,6 @@ fn parses_pr_number_repo_bot_list_and_findings_flags() {
         "coderabbitai,chatgpt-codex-connector",
         "--all",
         "--nitpicks",
-        "--no-reviews",
     ]))
     .unwrap();
     assert_eq!(parsed.command, CommandName::Findings);
@@ -156,7 +177,8 @@ fn parses_pr_number_repo_bot_list_and_findings_flags() {
         parsed.bots,
         ["coderabbitai", "chatgpt-codex-connector"].map(str::to_string)
     );
-    assert!(parsed.all && parsed.nitpicks && parsed.no_reviews);
+    assert!(parsed.all && parsed.nitpicks);
+    assert!(!parsed.no_reviews);
 }
 
 #[test]
@@ -179,13 +201,23 @@ fn supports_inline_value_flags() {
 }
 
 #[test]
+fn rejects_malicious_repo_values_and_meaningless_command_flags() {
+    assert!(parse_args(&args(&["status", "--repo=-malicious"])).is_err());
+    assert!(parse_args(&args(&["status", "--repo", "-malicious"])).is_err());
+    assert!(parse_args(&args(&["status", "--all"])).is_err());
+    assert!(parse_args(&args(&["findings", "--no-reviews"])).is_err());
+}
+
+#[test]
 fn parses_help_and_version_without_contacting_a_forge() {
     for values in [
         &["--help"][..],
         &["-h"][..],
         &["help"][..],
         &["status", "--help"][..],
+        &["help", "status"][..],
         &["gateway-token", "--help"][..],
+        &["gateway-token", "help"][..],
     ] {
         assert_eq!(
             parse_args(&args(values)).unwrap().command,
@@ -208,13 +240,13 @@ fn rejects_unknown_or_missing_subcommands() {
         parse_args(&args(&[]))
             .unwrap_err()
             .to_string()
-            .contains("missing subcommand")
+            .contains("Usage: babysit <COMMAND>")
     );
     assert!(
         parse_args(&args(&["checks"]))
             .unwrap_err()
             .to_string()
-            .contains("unknown subcommand")
+            .contains("unrecognized subcommand")
     );
 }
 
@@ -246,13 +278,13 @@ fn rejects_unknown_flags_and_missing_flag_values() {
         parse_args(&args(&["status", "--bad"]))
             .unwrap_err()
             .to_string()
-            .contains("unknown flag")
+            .contains("unexpected argument")
     );
     assert!(
         parse_args(&args(&["status", "--repo"]))
             .unwrap_err()
             .to_string()
-            .contains("requires a value")
+            .contains("a value is required")
     );
 }
 
@@ -268,7 +300,7 @@ fn rejects_invalid_or_duplicate_pr_numbers() {
         parse_args(&args(&["status", "63", "64"]))
             .unwrap_err()
             .to_string()
-            .contains("unexpected positional")
+            .contains("unexpected argument")
     );
 }
 
@@ -278,13 +310,13 @@ fn rejects_wait_only_flags_outside_wait() {
         parse_args(&args(&["status", "--timeout", "60"]))
             .unwrap_err()
             .to_string()
-            .contains("only valid with wait")
+            .contains("unexpected argument")
     );
     assert!(
         parse_args(&args(&["findings", "--interval=5"]))
             .unwrap_err()
             .to_string()
-            .contains("only valid with wait")
+            .contains("unexpected argument")
     );
 }
 
