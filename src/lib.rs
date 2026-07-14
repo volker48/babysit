@@ -5,5 +5,6 @@ pub mod credentials;
 pub mod event;
 pub mod forge;
 pub mod github;
+pub mod github_webhook;
 pub mod gitlab;
 pub mod wait;

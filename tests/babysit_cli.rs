@@ -22,9 +22,66 @@ fn cli_options_remains_constructible_through_its_public_fields() {
         events: false,
         gateway_url: None,
         gateway_token_action: None,
+        gateway_webhook_action: None,
     };
 
     assert_eq!(options.command, CommandName::Status);
+}
+
+#[test]
+fn parses_gateway_webhook_setup_with_required_repository() {
+    let parsed = parse_args(&args(&[
+        "gateway-webhook",
+        "setup",
+        "--repo",
+        "example-org/example-repo",
+    ]))
+    .unwrap();
+    assert_eq!(parsed.command, CommandName::GatewayWebhook);
+    assert_eq!(parsed.repo.as_deref(), Some("example-org/example-repo"));
+    assert_eq!(
+        parsed.gateway_webhook_action,
+        Some(babysit::cli::GatewayWebhookAction::Setup)
+    );
+
+    for values in [
+        &["gateway-webhook", "setup"][..],
+        &["gateway-webhook", "setup", "--repo", "owner"][..],
+        &["gateway-webhook", "setup", "--repo", "owner/repo/extra"][..],
+        &["gateway-webhook", "setup", "--repo", "owner/repo", "42"][..],
+        &["gateway-webhook", "setup", "--repo", "owner/repo", "--all"][..],
+    ] {
+        assert!(parse_args(&args(values)).is_err(), "{values:?}");
+    }
+}
+
+#[test]
+fn rejects_dot_path_components_but_allows_dotted_repository_names() {
+    for repo in ["owner/.", "owner/..", "./repo", "../repo"] {
+        assert!(
+            parse_args(&args(&["gateway-webhook", "setup", "--repo", repo])).is_err(),
+            "{repo} should be rejected"
+        );
+    }
+    assert!(
+        parse_args(&args(&[
+            "gateway-webhook",
+            "setup",
+            "--repo",
+            "owner/repo.v2"
+        ]))
+        .is_ok()
+    );
+}
+
+#[test]
+fn gateway_webhook_setup_help_is_available() {
+    assert_eq!(
+        parse_args(&args(&["gateway-webhook", "setup", "--help"]))
+            .unwrap()
+            .command,
+        CommandName::Help
+    );
 }
 
 #[test]

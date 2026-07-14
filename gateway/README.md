@@ -19,11 +19,23 @@ alarm late, but late/retried alarms drain retained work in cursor order rather t
 
 ## Deploy and operate
 
-The canonical manual deployment, webhook, Keychain, rotation, privacy, and troubleshooting runbook
-is [Gateway operations](../openwiki/operations/gateway.md). It names the two required Worker
-secrets (`WEBHOOK_SECRET` and `WATCHER_TOKEN`) without storing their values, the fixed GitHub
-webhook endpoint, and the CLI base URL. The CLI starts from `wss://babysit.mindgoblin.pw/watch` and
-adds encoded repository path segments from its authoritative snapshot.
+The Worker deployment and its two secrets (`WEBHOOK_SECRET` and `WATCHER_TOKEN`) remain manual;
+Cloudflare configuration, Keychain bearer-token enrollment, rotation, and the manual webhook
+setup alternative are not provisioned by this package. After deploying the Worker and setting
+`WEBHOOK_SECRET`, the repository hook can be created or reconciled through the authenticated local
+CLI without generating or exposing the existing secret. For interactive use, run:
+
+```bash
+babysit gateway-webhook setup --repo OWNER/REPOSITORY
+```
+
+Automation may pipe protected output from the operator's credential manager to the command's stdin.
+The command uses the fixed endpoint and event set, and is idempotent. The canonical manual
+deployment, webhook, Keychain, rotation, privacy, and troubleshooting runbook is [Gateway
+operations](../openwiki/operations/gateway.md). It names the required Worker secrets without
+storing their values and documents the fixed GitHub webhook endpoint and CLI base URL. The CLI
+starts from `wss://babysit.mindgoblin.pw/watch` and adds encoded repository path segments from its
+authoritative snapshot.
 
 ## Live smoke
 

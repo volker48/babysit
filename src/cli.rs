@@ -15,6 +15,9 @@ use crate::forge::{
     CliError, ForgeName, ForgeProvider, SnapshotFetchOptions, UsageError, auto_detect_forge,
 };
 use crate::github::create_github_provider;
+use crate::github_webhook::{
+    ProcessGh, SetupAction, read_webhook_secret, setup_webhook, validate_repository,
+};
 use crate::gitlab::create_gitlab_provider;
 use crate::wait::{PollingWakeSource, WaitOutcome, WakeSource, wait_until_settled};
 
@@ -24,6 +27,7 @@ pub enum CommandName {
     Findings,
     Wait,
     GatewayToken,
+    GatewayWebhook,
     Help,
     Version,
 }
@@ -38,6 +42,11 @@ pub enum GatewayTokenAction {
     Delete,
     /// Replace the gateway token.
     Rotate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayWebhookAction {
+    Setup,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +64,7 @@ pub struct CliOptions {
     pub events: bool,
     pub gateway_url: Option<String>,
     pub gateway_token_action: Option<GatewayTokenAction>,
+    pub gateway_webhook_action: Option<GatewayWebhookAction>,
 }
 
 /// Watch pull requests and merge requests until checks and bot reviews settle.
@@ -79,6 +89,25 @@ enum CliCommand {
         #[command(subcommand)]
         action: GatewayTokenAction,
     },
+    /// Create or update the GitHub webhook used for event-assisted waits.
+    #[command(name = "gateway-webhook")]
+    GatewayWebhook {
+        #[command(subcommand)]
+        action: GatewayWebhookCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GatewayWebhookCommand {
+    /// Create or update the gateway webhook for a repository.
+    Setup(GatewayWebhookSetupArgs),
+}
+
+#[derive(Debug, Args)]
+struct GatewayWebhookSetupArgs {
+    /// Repository to configure, in OWNER/REPOSITORY form.
+    #[arg(long, value_parser = parse_webhook_repository)]
+    repo: String,
 }
 
 #[derive(Debug, Args)]
@@ -218,6 +247,14 @@ impl Cli {
                 options.gateway_token_action = Some(action);
                 options
             }
+            CliCommand::GatewayWebhook {
+                action: GatewayWebhookCommand::Setup(args),
+            } => {
+                let mut options = default_options(CommandName::GatewayWebhook);
+                options.repo = Some(args.repo);
+                options.gateway_webhook_action = Some(GatewayWebhookAction::Setup);
+                options
+            }
         }
     }
 }
@@ -237,6 +274,7 @@ fn options_from_common(command: CommandName, common: CommonArgs) -> CliOptions {
         events: false,
         gateway_url: None,
         gateway_token_action: None,
+        gateway_webhook_action: None,
     }
 }
 
@@ -255,6 +293,7 @@ fn default_options(command: CommandName) -> CliOptions {
         events: false,
         gateway_url: None,
         gateway_token_action: None,
+        gateway_webhook_action: None,
     }
 }
 
@@ -277,6 +316,12 @@ fn parse_repo(value: &str) -> Result<String, String> {
     } else {
         Ok(trimmed.to_string())
     }
+}
+
+fn parse_webhook_repository(value: &str) -> Result<String, String> {
+    let repo = parse_repo(value)?;
+    validate_repository(&repo).map_err(str::to_string)?;
+    Ok(repo)
 }
 
 #[derive(Debug, Clone)]
@@ -358,10 +403,24 @@ fn run_inner(argv: &[String]) -> Result<i32, RunError> {
         CommandName::Findings => run_findings(&opts).map_err(RunError::Cli),
         CommandName::Wait => run_wait(&opts).map_err(RunError::Cli),
         CommandName::GatewayToken => run_gateway_token(&opts).map_err(RunError::Cli),
+        CommandName::GatewayWebhook => run_gateway_webhook(&opts).map_err(RunError::Cli),
         CommandName::Help | CommandName::Version => {
             unreachable!("display requests are handled while parsing")
         }
     }
+}
+
+fn run_gateway_webhook(opts: &CliOptions) -> Result<i32, CliError> {
+    let secret = read_webhook_secret()?;
+    let mut gh = ProcessGh;
+    let repo = opts.repo.as_deref().expect("webhook repository was parsed");
+    let result = setup_webhook(repo, &secret, &mut gh)?;
+    let action = match result.action {
+        SetupAction::Created => "created",
+        SetupAction::Updated => "updated",
+    };
+    println!("GitHub webhook {action} for {repo}");
+    Ok(0)
 }
 
 fn run_gateway_token(opts: &CliOptions) -> Result<i32, CliError> {
