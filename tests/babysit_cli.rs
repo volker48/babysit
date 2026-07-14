@@ -17,7 +17,7 @@ fn cli_options_remains_constructible_through_its_public_fields() {
         all: false,
         nitpicks: false,
         no_reviews: false,
-        timeout_secs: 1800,
+        timeout_secs: 300,
         interval_secs: 30,
         events: false,
         gateway_url: None,
@@ -153,7 +153,15 @@ fn parses_status_defaults() {
     assert!(!parsed.all);
     assert!(!parsed.nitpicks);
     assert!(!parsed.no_reviews);
-    assert_eq!(parsed.timeout_secs, 1800);
+    assert_eq!(parsed.timeout_secs, 300);
+    assert_eq!(parsed.interval_secs, 30);
+}
+
+#[test]
+fn wait_defaults_to_a_five_minute_timeout_and_thirty_second_polling() {
+    let parsed = parse_args(&args(&["wait"])).unwrap();
+
+    assert_eq!(parsed.timeout_secs, 300);
     assert_eq!(parsed.interval_secs, 30);
 }
 

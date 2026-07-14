@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand};
 
+const DEFAULT_WAIT_SECONDS: u64 = 5 * 60;
 const MAX_WAIT_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 use crate::bots::DEFAULT_BOTS;
@@ -166,7 +167,7 @@ struct WaitArgs {
     /// Overall wait deadline in seconds.
     #[arg(
         long = "timeout",
-        default_value_t = 1800,
+        default_value_t = DEFAULT_WAIT_SECONDS,
         value_parser = parse_seconds
     )]
     timeout_secs: u64,
@@ -269,7 +270,7 @@ fn options_from_common(command: CommandName, common: CommonArgs) -> CliOptions {
         all: false,
         nitpicks: false,
         no_reviews: false,
-        timeout_secs: 1800,
+        timeout_secs: DEFAULT_WAIT_SECONDS,
         interval_secs: 30,
         events: false,
         gateway_url: None,
@@ -288,7 +289,7 @@ fn default_options(command: CommandName) -> CliOptions {
         all: false,
         nitpicks: false,
         no_reviews: false,
-        timeout_secs: 1800,
+        timeout_secs: DEFAULT_WAIT_SECONDS,
         interval_secs: 30,
         events: false,
         gateway_url: None,
