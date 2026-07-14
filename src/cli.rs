@@ -55,7 +55,6 @@ pub struct CliOptions {
     pub events: bool,
     pub gateway_url: Option<String>,
     pub gateway_token_action: Option<GatewayTokenAction>,
-    display: Option<String>,
 }
 
 /// Watch pull requests and merge requests until checks and bot reviews settle.
@@ -153,17 +152,34 @@ struct WaitArgs {
     gateway_url: Option<String>,
 }
 
+enum ParseOutcome {
+    Options(CliOptions),
+    Display {
+        command: CommandName,
+        output: String,
+    },
+}
+
 pub fn parse_args(argv: &[String]) -> Result<CliOptions, UsageError> {
+    match parse_cli(argv)? {
+        ParseOutcome::Options(options) => Ok(options),
+        ParseOutcome::Display { command, .. } => Ok(default_options(command)),
+    }
+}
+
+fn parse_cli(argv: &[String]) -> Result<ParseOutcome, UsageError> {
     let args = std::iter::once("babysit".to_string()).chain(argv.iter().cloned());
     match Cli::try_parse_from(args) {
-        Ok(cli) => Ok(cli.into_options()),
+        Ok(cli) => Ok(ParseOutcome::Options(cli.into_options())),
         Err(error) => match error.kind() {
-            clap::error::ErrorKind::DisplayHelp => {
-                Ok(display_options(CommandName::Help, error.to_string()))
-            }
-            clap::error::ErrorKind::DisplayVersion => {
-                Ok(display_options(CommandName::Version, error.to_string()))
-            }
+            clap::error::ErrorKind::DisplayHelp => Ok(ParseOutcome::Display {
+                command: CommandName::Help,
+                output: error.to_string(),
+            }),
+            clap::error::ErrorKind::DisplayVersion => Ok(ParseOutcome::Display {
+                command: CommandName::Version,
+                output: error.to_string(),
+            }),
             _ => Err(UsageError::new(error.to_string())),
         },
     }
@@ -221,7 +237,6 @@ fn options_from_common(command: CommandName, common: CommonArgs) -> CliOptions {
         events: false,
         gateway_url: None,
         gateway_token_action: None,
-        display: None,
     }
 }
 
@@ -240,14 +255,7 @@ fn default_options(command: CommandName) -> CliOptions {
         events: false,
         gateway_url: None,
         gateway_token_action: None,
-        display: None,
     }
-}
-
-fn display_options(command: CommandName, display: String) -> CliOptions {
-    let mut options = default_options(command);
-    options.display = Some(display);
-    options
 }
 
 fn default_bots() -> Vec<String> {
@@ -338,21 +346,20 @@ enum RunError {
 }
 
 fn run_inner(argv: &[String]) -> Result<i32, RunError> {
-    let opts = parse_args(argv).map_err(RunError::Usage)?;
+    let opts = match parse_cli(argv).map_err(RunError::Usage)? {
+        ParseOutcome::Options(options) => options,
+        ParseOutcome::Display { output, .. } => {
+            println!("{}", output.trim_end());
+            return Ok(0);
+        }
+    };
     match opts.command {
         CommandName::Status => run_status(&opts).map_err(RunError::Cli),
         CommandName::Findings => run_findings(&opts).map_err(RunError::Cli),
         CommandName::Wait => run_wait(&opts).map_err(RunError::Cli),
         CommandName::GatewayToken => run_gateway_token(&opts).map_err(RunError::Cli),
         CommandName::Help | CommandName::Version => {
-            println!(
-                "{}",
-                opts.display
-                    .as_deref()
-                    .expect("display output was parsed")
-                    .trim_end()
-            );
-            Ok(0)
+            unreachable!("display requests are handled while parsing")
         }
     }
 }

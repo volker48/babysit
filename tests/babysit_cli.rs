@@ -1,9 +1,30 @@
 use babysit::bots::DEFAULT_BOTS;
-use babysit::cli::{CommandName, parse_args};
+use babysit::cli::{CliOptions, CommandName, parse_args};
 use babysit::forge::{ForgeName, detect_forge_from_remote_url};
 
 fn args(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| value.to_string()).collect()
+}
+
+#[test]
+fn cli_options_remains_constructible_through_its_public_fields() {
+    let options = CliOptions {
+        command: CommandName::Status,
+        pr: None,
+        repo: None,
+        bots: Vec::new(),
+        forge: None,
+        all: false,
+        nitpicks: false,
+        no_reviews: false,
+        timeout_secs: 1800,
+        interval_secs: 30,
+        events: false,
+        gateway_url: None,
+        gateway_token_action: None,
+    };
+
+    assert_eq!(options.command, CommandName::Status);
 }
 
 #[test]
