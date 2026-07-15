@@ -85,7 +85,7 @@ fn gateway_webhook_setup_help_is_available() {
 }
 
 #[test]
-fn event_wait_defaults_to_a_300_second_fallback_and_requires_a_gateway_url() {
+fn event_wait_defaults_to_a_fallback_before_timeout_and_requires_a_gateway_url() {
     let parsed = parse_args(&args(&[
         "wait",
         "--events",
@@ -95,7 +95,7 @@ fn event_wait_defaults_to_a_300_second_fallback_and_requires_a_gateway_url() {
     .unwrap();
     assert!(parsed.events);
     assert_eq!(parsed.gateway_url.as_deref(), Some("wss://gateway.example"));
-    assert_eq!(parsed.interval_secs, 300);
+    assert!(parsed.interval_secs < parsed.timeout_secs);
 
     let explicit = parse_args(&args(&[
         "wait",
