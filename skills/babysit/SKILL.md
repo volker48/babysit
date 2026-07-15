@@ -27,7 +27,7 @@ Options:
 - `--all` — include resolved and outdated findings
 - `--nitpicks` — include CodeRabbit nitpick review-body findings
 - `--no-reviews` — settle without waiting for a bot review
-- `--timeout <secs>` — `wait` only; default 1800
+- `--timeout <secs>` — `wait` only; default 300 (5 minutes)
 - `--interval <secs>` — `wait` only; default 30 when polling, 300 as the event-mode fallback
 - `--events` — `wait` only; use GitHub webhook events to wake the waiter
 - `--gateway-url <wss-url>` — required with `--events`; the gateway's base WebSocket URL

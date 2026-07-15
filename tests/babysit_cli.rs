@@ -17,7 +17,7 @@ fn cli_options_remains_constructible_through_its_public_fields() {
         all: false,
         nitpicks: false,
         no_reviews: false,
-        timeout_secs: 1800,
+        timeout_secs: 300,
         interval_secs: 30,
         events: false,
         gateway_url: None,
@@ -85,7 +85,7 @@ fn gateway_webhook_setup_help_is_available() {
 }
 
 #[test]
-fn event_wait_defaults_to_a_300_second_fallback_and_requires_a_gateway_url() {
+fn event_wait_defaults_to_a_fallback_before_timeout_and_requires_a_gateway_url() {
     let parsed = parse_args(&args(&[
         "wait",
         "--events",
@@ -95,7 +95,7 @@ fn event_wait_defaults_to_a_300_second_fallback_and_requires_a_gateway_url() {
     .unwrap();
     assert!(parsed.events);
     assert_eq!(parsed.gateway_url.as_deref(), Some("wss://gateway.example"));
-    assert_eq!(parsed.interval_secs, 300);
+    assert!(parsed.interval_secs < parsed.timeout_secs);
 
     let explicit = parse_args(&args(&[
         "wait",
@@ -153,7 +153,15 @@ fn parses_status_defaults() {
     assert!(!parsed.all);
     assert!(!parsed.nitpicks);
     assert!(!parsed.no_reviews);
-    assert_eq!(parsed.timeout_secs, 1800);
+    assert_eq!(parsed.timeout_secs, 300);
+    assert_eq!(parsed.interval_secs, 30);
+}
+
+#[test]
+fn wait_defaults_to_a_five_minute_timeout_and_thirty_second_polling() {
+    let parsed = parse_args(&args(&["wait"])).unwrap();
+
+    assert_eq!(parsed.timeout_secs, 300);
     assert_eq!(parsed.interval_secs, 30);
 }
 

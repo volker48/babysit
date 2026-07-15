@@ -76,7 +76,7 @@ Options:
 --all                    findings/wait only; include resolved and outdated findings
 --nitpicks               Include CodeRabbit nitpick review-body findings
 --no-reviews             status/wait only; settle without waiting for a bot review
---timeout <secs>         wait only; overall deadline, default 1800
+--timeout <secs>         wait only; overall deadline, default 300 (5 minutes)
 --interval <secs>        wait only; default 30 (event fallback default 300)
 --events                 wait only; opt in to GitHub event-assisted wakes
 --gateway-url <wss-url>  wait only; required with --events; exact non-secret wss://host/watch base URL
