@@ -237,8 +237,9 @@ impl Cli {
                 options.no_reviews = args.no_reviews;
                 options.timeout_secs = args.timeout_secs;
                 options.interval_secs =
+                    // Add a ~30 second buffer for safety so a quiet or missed gateway wake gets the documented fallback poll before timing out
                     args.interval_secs
-                        .unwrap_or(if args.events { 300 } else { 30 });
+                        .unwrap_or(if args.events { DEFAULT_WAIT_SECONDS.saturating_sub(30) } else { 30 });
                 options.events = args.events;
                 options.gateway_url = args.gateway_url;
                 options
