@@ -76,13 +76,18 @@ export const test = base.extend<{ cli: Cli }>({
             child.stdin.end(stdin);
           });
           const calls = (await readFile(`${script}.calls`, "utf8")).trim();
+          const recordedCalls = calls
+            ? calls.split("\n").map((line) => JSON.parse(line) as Call)
+            : [];
+          // wait can swallow retryable command errors, so verify the boundary log directly.
+          expect(recordedCalls).toHaveLength(steps.length);
           expect(stderr).not.toContain("Unexpected external command");
           expect(JSON.parse(await readFile(script, "utf8"))).toEqual([]);
           return {
             code,
             stdout,
             stderr,
-            calls: calls ? calls.split("\n").map((line) => JSON.parse(line) as Call) : [],
+            calls: recordedCalls,
           };
         },
       });
