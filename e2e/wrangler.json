@@ -1,0 +1,9 @@
+{
+  "name": "babysit-e2e",
+  "main": "../gateway/src/worker.ts",
+  "compatibility_date": "2026-07-10",
+  "durable_objects": {
+    "bindings": [{ "name": "REPOSITORY_GATEWAY", "class_name": "RepositoryGateway" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RepositoryGateway"] }]
+}

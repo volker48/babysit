@@ -3,4 +3,5 @@ node_modules/
 gateway/.dev.vars
 gateway/.wrangler/
 .DS_Store
+.e2e/
 !.claude/

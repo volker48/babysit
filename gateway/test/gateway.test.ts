@@ -129,6 +129,18 @@ function register(
 }
 
 describe("GitHub status gateway", () => {
+  it.each(["GET", "HEAD", "PUT", "PATCH", "DELETE"])(
+    "rejects %s webhook requests before accessing bindings",
+    async (method) => {
+      const response = await workerFetch(
+        new Request("https://gateway.test/webhooks/github", { method }),
+        missingBindingEnv(),
+      );
+      expect(response.status).toBe(405);
+      expect(response.headers.get("Allow")).toBe("POST");
+    },
+  );
+
   it("returns not found for malformed watch-path escapes", async () => {
     const response = await exports.default.fetch("https://gateway.test/watch/%ZZ/repo");
 
