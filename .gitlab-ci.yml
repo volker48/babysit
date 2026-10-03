@@ -78,6 +78,31 @@ gateway_test:
   script:
     - pnpm --filter @babysit/gateway test
 
+e2e:
+  extends: .default_gateway_job
+  stage: verify
+  timeout: 15 minutes
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gcc libc6-dev
+    - curl --fail --silent --show-error --location https://static.rust-lang.org/rustup/archive/1.29.1/x86_64-unknown-linux-gnu/rustup-init --output /tmp/rustup-init
+    - echo "dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71  /tmp/rustup-init" | sha256sum --check
+    - chmod +x /tmp/rustup-init
+    - /tmp/rustup-init --yes --profile minimal --default-toolchain none --no-modify-path
+    - export PATH="$CARGO_HOME/bin:$PATH"
+    - rustup toolchain install
+    - corepack enable
+    - pnpm install --frozen-lockfile --ignore-scripts
+  script:
+    - pnpm --filter @babysit/e2e lint
+    - pnpm --filter @babysit/e2e format:check
+    - pnpm --filter @babysit/e2e typecheck
+    - pnpm test:e2e
+  artifacts:
+    when: always
+    paths:
+      - e2e/.e2e/
+    expire_in: 7 days
+
 release:
   extends: .default_rust_job
   stage: build

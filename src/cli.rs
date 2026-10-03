@@ -304,7 +304,9 @@ fn default_bots() -> Vec<String> {
 }
 
 fn parse_pr(value: &str) -> Result<String, String> {
-    if !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()) {
+    if value.chars().all(|ch| ch.is_ascii_digit())
+        && value.parse::<u64>().is_ok_and(|number| number > 0)
+    {
         Ok(value.to_string())
     } else {
         Err(format!("invalid PR number: {value}"))
@@ -533,7 +535,7 @@ fn wait_output(
 ) -> String {
     let findings = selected_findings(snapshot, opts);
     let mut blocks = vec![render_status(snapshot, settle, label)];
-    if !unresolved_findings(snapshot).is_empty() {
+    if !findings.is_empty() {
         blocks.push(render_findings(&findings, "findings"));
     }
     blocks.join("\n\n")

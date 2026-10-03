@@ -345,6 +345,20 @@ fn rejects_empty_bot_lists_and_non_positive_intervals() {
 }
 
 #[test]
+fn rejects_zero_and_overflowing_change_numbers() {
+    for number in ["0", "000", "18446744073709551616"] {
+        for command in ["status", "findings", "wait"] {
+            assert!(
+                parse_args(&args(&[command, number]))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("invalid PR number")
+            );
+        }
+    }
+}
+
+#[test]
 fn rejects_oversized_wait_durations() {
     assert!(
         parse_args(&args(&["wait", "--timeout", "18446744073709551615"]))

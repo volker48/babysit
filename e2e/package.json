@@ -1,0 +1,22 @@
+{
+  "name": "@babysit/e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "cargo build --locked --manifest-path ../Cargo.toml && E2E_TELEMETRY_DISABLED=1 WRANGLER_SEND_METRICS=false WRANGLER_LOG_PATH=.e2e/logs/wrangler.log e2e run",
+    "lint": "oxlint .",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.17",
+    "@types/ws": "8.18.2",
+    "e2e": "0.16.0",
+    "oxfmt": "0.58.0",
+    "oxlint": "1.73.0",
+    "typescript": "5.8.3",
+    "wrangler": "4.109.0",
+    "ws": "8.22.0"
+  }
+}

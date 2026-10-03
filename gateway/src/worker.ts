@@ -116,6 +116,9 @@ export class RepositoryGateway extends DurableObject<Env> {
 }
 
 async function receiveWebhook(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") {
+    return new Response("method not allowed", { status: 405, headers: { Allow: "POST" } });
+  }
   if (!isConfiguredSecret(env.WEBHOOK_SECRET)) return unavailable();
   const body = await request.arrayBuffer();
   const signature = request.headers.get("X-Hub-Signature-256");

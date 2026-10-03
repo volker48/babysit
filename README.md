@@ -168,8 +168,17 @@ cargo test --locked --all
 cargo build --locked --release
 ```
 
-GitLab CI runs the same format, lint, test, and release-build gates on branches
-and merge requests.
+GitHub Actions and GitLab CI run the format, lint, test, and release-build gates.
+The [end-to-end suite](e2e/README.md) uses tester-army/e2e to exercise the compiled CLI
+and a local HTTP/WebSocket gateway without live service credentials:
+
+```bash
+corepack enable
+pnpm install --frozen-lockfile --ignore-scripts
+pnpm test:e2e
+```
+
+See the suite's coverage table for each flow and the separate live-smoke requirements.
 
 ## Release policy
 

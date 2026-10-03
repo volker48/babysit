@@ -1,2 +1,6 @@
 packages:
   - gateway
+  - e2e
+
+ignoreScripts: true
+minimumReleaseAge: 1440
