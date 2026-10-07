@@ -2,7 +2,7 @@ use std::cell::RefCell;
 
 use babysit::cli::{GatewayTokenAction, gateway_token_action};
 use babysit::credentials::{ACCOUNT, SERVICE, SecretToken, TokenStore};
-use babysit::forge::CliError;
+use babysit::error::CliError;
 
 #[derive(Default)]
 struct MemoryStore(RefCell<Option<SecretToken>>);

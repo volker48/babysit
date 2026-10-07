@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use babysit::forge::CliError;
+use babysit::error::CliError;
 use babysit::github_webhook::{GhClient, SetupAction, WebhookSecret, setup_webhook};
 use serde_json::{Value, json};
 

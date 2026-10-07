@@ -1,6 +1,5 @@
-use std::io::{self, IsTerminal, Read};
-
-use crate::forge::CliError;
+use crate::error::CliError;
+use crate::secret_input::read_secret_line;
 
 pub const SERVICE: &str = "babysit";
 pub const ACCOUNT: &str = "gateway-bearer-token";
@@ -35,27 +34,7 @@ pub trait TokenStore {
 
 /// Reads a bearer token from piped stdin or a no-echo terminal prompt.
 pub fn read_token() -> Result<SecretToken, CliError> {
-    let mut value = if io::stdin().is_terminal() {
-        rpassword::prompt_password("Gateway token: ").map_err(|error| {
-            CliError::new(format!("could not read gateway token: {error}"), false)
-        })?
-    } else {
-        let mut input = String::new();
-        io::stdin().read_to_string(&mut input).map_err(|error| {
-            CliError::new(format!("could not read gateway token: {error}"), false)
-        })?;
-        input
-    };
-    trim_final_newline(&mut value);
-    SecretToken::new(value)
-}
-
-fn trim_final_newline(value: &mut String) {
-    if value.ends_with("\r\n") {
-        value.truncate(value.len() - 2);
-    } else if value.ends_with('\n') {
-        value.pop();
-    }
+    SecretToken::new(read_secret_line("Gateway token: ", "gateway token")?)
 }
 
 pub fn production_store() -> Box<dyn TokenStore> {

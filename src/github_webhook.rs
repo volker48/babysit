@@ -1,8 +1,8 @@
-use std::io::{self, IsTerminal, Read};
-
 use serde_json::{Map, Value, json};
 
-use crate::forge::{CliError, run_json, run_json_pages, run_json_with_stdin};
+use crate::error::CliError;
+use crate::process::{run_json, run_json_pages, run_json_with_stdin};
+use crate::secret_input::read_secret_line;
 
 pub const WEBHOOK_URL: &str = "https://babysit.mindgoblin.pw/webhooks/github";
 const PAGE_SIZE: usize = 100;
@@ -38,33 +38,10 @@ impl WebhookSecret {
 
 /// Reads the existing secret from protected stdin or a no-echo terminal prompt.
 pub fn read_webhook_secret() -> Result<WebhookSecret, CliError> {
-    let mut value = if io::stdin().is_terminal() {
-        rpassword::prompt_password("Cloudflare WEBHOOK_SECRET: ").map_err(|error| {
-            CliError::new(
-                format!("could not read Cloudflare webhook secret: {error}"),
-                false,
-            )
-        })?
-    } else {
-        let mut input = String::new();
-        io::stdin().read_to_string(&mut input).map_err(|error| {
-            CliError::new(
-                format!("could not read Cloudflare webhook secret: {error}"),
-                false,
-            )
-        })?;
-        input
-    };
-    trim_final_newline(&mut value);
-    WebhookSecret::new(value)
-}
-
-fn trim_final_newline(value: &mut String) {
-    if value.ends_with("\r\n") {
-        value.truncate(value.len() - 2);
-    } else if value.ends_with('\n') {
-        value.pop();
-    }
+    WebhookSecret::new(read_secret_line(
+        "Cloudflare WEBHOOK_SECRET: ",
+        "Cloudflare webhook secret",
+    )?)
 }
 
 /// Injectable boundary around authenticated local `gh` calls.
