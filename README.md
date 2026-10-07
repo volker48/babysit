@@ -11,6 +11,19 @@ agents or humans to act on.
 
 ## Install
 
+### Homebrew (macOS)
+
+```bash
+brew tap volker48/babysit https://github.com/volker48/babysit
+brew install volker48/babysit/babysit
+```
+
+Upgrade later with `brew update && brew upgrade babysit`. The formula lives in
+`Formula/babysit.rb`; for each tagged release the release workflow opens a pull request that
+updates it, and `brew upgrade` sees the new version once that pull request is merged.
+
+### Manual download
+
 Release binaries require macOS. Install the archive for your Mac into a directory on `PATH`:
 
 ```bash
