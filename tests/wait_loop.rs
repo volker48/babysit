@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use babysit::core::{CheckState, Finding, PrCheck, PrSnapshot, SettleOptions, exit_code_for};
-use babysit::forge::CliError;
+use babysit::error::CliError;
 use babysit::wait::{SnapshotAction, WaitOutcome, WakeSource, wait_until_settled};
 
 struct FakeWakeSource {

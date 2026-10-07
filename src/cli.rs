@@ -11,12 +11,11 @@ use crate::core::{
     render_findings, render_status, unresolved_findings,
 };
 use crate::credentials::{production_store, read_token};
+use crate::error::{CliError, UsageError};
 use crate::event::EventWakeSource;
 use crate::forge::github::create_github_provider;
 use crate::forge::gitlab::create_gitlab_provider;
-use crate::forge::{
-    CliError, ForgeName, ForgeProvider, SnapshotFetchOptions, UsageError, auto_detect_forge,
-};
+use crate::forge::{ForgeName, ForgeProvider, SnapshotFetchOptions, auto_detect_forge};
 use crate::github_webhook::{
     ProcessGh, SetupAction, read_webhook_secret, setup_webhook, validate_repository,
 };

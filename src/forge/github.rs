@@ -7,9 +7,9 @@ use crate::bots::adapter_for_login;
 use crate::core::{
     BotReview, CheckState, PrCheck, PrSnapshot, ReviewData, ReviewThread, findings_from_threads,
 };
-use crate::forge::{
-    CliError, ForgeProvider, SnapshotFetchOptions, parse_json_failure, run_json_deadline,
-};
+use crate::error::CliError;
+use crate::forge::{ForgeProvider, SnapshotFetchOptions};
+use crate::process::{parse_json_failure, run_json_deadline};
 
 const MAX_REVIEW_PAGES: usize = 100;
 

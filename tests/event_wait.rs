@@ -5,11 +5,11 @@ use std::time::{Duration, Instant};
 
 use babysit::core::{PrSnapshot, SettleOptions};
 use babysit::credentials::{SecretToken, TokenStore};
+use babysit::error::CliError;
 use babysit::event::{
     EventRuntime, EventWakeSource, GatewayConfig, GatewayError, GatewaySocket,
     GatewaySocketFactory, classify_gateway_status, classify_transport_kind,
 };
-use babysit::forge::CliError;
 use babysit::wait::{WaitOutcome, wait_until_settled};
 
 #[derive(Clone)]

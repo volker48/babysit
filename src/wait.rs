@@ -2,7 +2,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::core::{PrSnapshot, SettleOptions, SettleResult, evaluate_settled};
-use crate::forge::CliError;
+use crate::error::CliError;
 
 /// A post-snapshot action requested by an event-aware wake source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

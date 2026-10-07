@@ -3,10 +3,9 @@ use serde_json::Value;
 
 use crate::bots::adapter_for_login;
 use crate::core::{BotReview, CheckState, PrCheck, PrSnapshot, ReviewThread, finding_from_thread};
-use crate::forge::{
-    CliError, ForgeProvider, SnapshotFetchOptions, parse_json_failure, run_json_deadline,
-    run_json_pages,
-};
+use crate::error::CliError;
+use crate::forge::{ForgeProvider, SnapshotFetchOptions};
+use crate::process::{parse_json_failure, run_json_deadline, run_json_pages};
 
 #[derive(Debug, Clone)]
 pub struct GitLabMrParseResult {

@@ -16,7 +16,7 @@ use babysit::forge::gitlab::{
     parse_gitlab_bot_reviews, parse_gitlab_findings, parse_gitlab_findings_for_head,
     parse_gitlab_jobs, parse_gitlab_mr,
 };
-use babysit::forge::{collect_json_pages, run_json_deadline, run_json_pages};
+use babysit::process::{collect_json_pages, run_json_deadline, run_json_pages};
 
 #[test]
 fn expired_command_deadline_does_not_start_a_subprocess() {
